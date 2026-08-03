@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inference:verdict:0.1",
+  "title": "LLM-as-judge verdict",
+  "type": "object",
+  "required": ["claim", "observed", "match", "confidence", "reasoning"],
+  "properties": {
+    "claim": {
+      "type": "string",
+      "description": "The specific assertion under evaluation."
+    },
+    "observed": {
+      "type": "string",
+      "description": "What was actually observed in the subject under evaluation, quoting evidence where possible."
+    },
+    "match": {
+      "enum": ["pass", "fail", "partial"],
+      "description": "pass only if the assertion is fully satisfied; partial for partial compliance."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Self-reported confidence in this verdict."
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Why this conclusion was reached."
+    }
+  },
+  "additionalProperties": false
+}

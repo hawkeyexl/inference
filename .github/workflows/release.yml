@@ -1,0 +1,55 @@
+# Release pipeline (mirrors dockg's / docmeta's). Manual-only until the
+# one-time setup is done:
+#   1. Create/install the release GitHub App and add RELEASE_APP_ID /
+#      RELEASE_APP_PRIVATE_KEY secrets (see docmeta docs/maintainers/releasing.md).
+#   2. Configure npm OIDC trusted publishing for this repo + workflow file,
+#      or add an NPM_TOKEN secret and set it on the Release step.
+# Then replace `workflow_dispatch` with push-branch triggers.
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write # OIDC trusted publishing to npm + provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      # npm install for the same reason as ci.yml (platform-skewed lock).
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: npx semantic-release
