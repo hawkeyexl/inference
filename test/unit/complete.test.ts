@@ -1,3 +1,9 @@
+/**
+ * `MockProvider` is a permitted double: it stands in for a remote LLM API,
+ * which is billed, rate-limited and non-deterministic (CLAUDE.md, real-machine
+ * verification). Everything around it here — schema compilation, retry
+ * accounting, consensus maths, cache round-trips — runs for real.
+ */
 import { describe, expect, it } from "vitest";
 import {
   MockProvider,
