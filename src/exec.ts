@@ -34,6 +34,11 @@ export const realExec: ExecFn = (cmd, opts = {}) => {
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill();
+      // Settle on the timeout itself rather than waiting for 'close'. On POSIX
+      // a child that handles SIGTERM survives kill(), so 'close' would never
+      // fire and the caller would hang forever with no timeout error. (On
+      // Windows kill() is forceful, so this is belt-and-braces there.)
+      settle({ code: null, stdout, stderr, timedOut: true });
     }, timeoutMs);
 
     const settle = (result: ExecResult): void => {

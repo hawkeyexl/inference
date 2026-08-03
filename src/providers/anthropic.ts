@@ -73,6 +73,16 @@ export class AnthropicProvider implements InferenceProvider {
       tool_choice: { type: "tool", name: this.toolName },
     });
 
+    // A truncated tool call still arrives as a tool_use block, just with
+    // partial input. Without this check it fails schema validation instead,
+    // burning the retry and reporting a misleading validation error rather
+    // than the actionable "raise maxTokens".
+    if (response.stop_reason === "max_tokens") {
+      throw new Error(
+        `Anthropic response hit max_tokens (${this.maxTokens}) before completing the tool call — raise the anthropic.maxTokens option.`,
+      );
+    }
+
     const toolUse = response.content.find(
       (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
     );

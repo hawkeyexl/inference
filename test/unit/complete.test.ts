@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { MockProvider, completeValidatedJSON } from "../../src/index.js";
+import {
+  MockProvider,
+  completeValidatedJSON,
+  validatorFor,
+} from "../../src/index.js";
 
 const SCHEMA = {
   type: "object",
@@ -112,5 +116,36 @@ describe("completeValidatedJSON", () => {
       schema: SCHEMA,
     });
     expect(provider.requests[0]?.temperature).toBe(0);
+  });
+});
+
+describe("validatorFor", () => {
+  it("reuses the compiled validator for the same schema object", () => {
+    const schema = { type: "object" };
+    expect(validatorFor(schema)).toBe(validatorFor(schema));
+  });
+
+  it("compiles distinct schema objects that share an $id", () => {
+    // A caller that rebuilds an equal schema object per call (spreading a base
+    // schema to override descriptions, say) misses the identity cache. A
+    // shared Ajv registry would reject the second compile as a duplicate $id.
+    const build = () => ({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "mytool:verdict:0.1",
+      type: "object",
+      required: ["n"],
+      properties: { n: { type: "number" } },
+    });
+    expect(() => {
+      validatorFor(build());
+      validatorFor(build());
+    }).not.toThrow();
+  });
+
+  it("keeps validators for same-$id schemas independent", () => {
+    const a = validatorFor({ $id: "dup:1", type: "object", required: ["a"] });
+    const b = validatorFor({ $id: "dup:1", type: "object", required: ["b"] });
+    expect(a({ a: 1 })).toBe(true);
+    expect(b({ a: 1 })).toBe(false);
   });
 });

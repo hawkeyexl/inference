@@ -71,7 +71,11 @@ export async function runEnsemble(
 
   if (cache && cacheKey) {
     const hit = cache.get(cacheKey);
-    if (hit) return hit.map((r) => ({ ...r, cached: true }));
+    // A cache file can be valid JSON and still be the wrong shape — a
+    // truncated write, or an entry from an older cache generation. JsonCache
+    // only guards parse failures, so the shape check belongs here; a bad entry
+    // is a miss, never a crash.
+    if (Array.isArray(hit)) return hit.map((r) => ({ ...r, cached: true }));
   }
 
   // Compile the schema once for the whole ensemble rather than per run.

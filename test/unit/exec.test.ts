@@ -58,4 +58,20 @@ describe("realExec", () => {
     });
     expect(result.timedOut).toBe(true);
   });
+
+  it("settles on timeout even when the child ignores SIGTERM", async () => {
+    // On POSIX a child with a SIGTERM handler survives child.kill(), so
+    // 'close' never fires. Settling only on 'close' would hang the caller
+    // forever with no timeout error.
+    const result = await realExec(
+      [
+        NODE,
+        "-e",
+        "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});setInterval(()=>{},1000)",
+      ],
+      { timeoutMs: 500 },
+    );
+    expect(result.timedOut).toBe(true);
+    expect(result.code).toBeNull();
+  }, 5000);
 });

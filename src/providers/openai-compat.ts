@@ -57,6 +57,11 @@ export function toStrictSchema(
     const properties = obj["properties"];
     if (properties && typeof properties === "object") {
       obj["required"] = Object.keys(properties);
+      // Strict mode requires additionalProperties:false on EVERY object, not
+      // just the root. A nested object without it is rejected as a schema
+      // error, which permanently downgrades this provider to the weaker
+      // json_object fallback for the rest of its life.
+      obj["additionalProperties"] = false;
       for (const prop of Object.values(properties as Record<string, unknown>)) {
         walk(prop);
         if (prop && typeof prop === "object" && !Array.isArray(prop)) {

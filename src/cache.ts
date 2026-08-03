@@ -20,7 +20,10 @@ export function sha256(text: string): string {
  * joined string stays small.
  */
 export function buildCacheKey(parts: string[]): string {
-  return sha256(parts.join("|"));
+  // Length-prefixed, not plain-joined: a part that itself contains the
+  // separator would otherwise let two different compositions — ["a|b", "c"]
+  // and ["a", "b|c"] — share one cached result.
+  return sha256(parts.map((p) => `${p.length}:${p}`).join("|"));
 }
 
 export class JsonCache<T> {

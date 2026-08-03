@@ -166,6 +166,18 @@ describe("toStrictSchema", () => {
     toStrictSchema(schema);
     expect(JSON.stringify(schema)).toBe(before);
   });
+
+  it("closes every object, not just the root", () => {
+    // OpenAI strict mode requires additionalProperties:false on EVERY object.
+    // A nested object without it is rejected with a schema error, which
+    // permanently downgrades the provider to the json_object fallback.
+    const strict = toStrictSchema(schema) as never as {
+      additionalProperties: boolean;
+      properties: { nested: { additionalProperties: boolean } };
+    };
+    expect(strict.additionalProperties).toBe(false);
+    expect(strict.properties.nested.additionalProperties).toBe(false);
+  });
 });
 
 describe("stripNulls", () => {

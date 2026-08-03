@@ -25,6 +25,12 @@ describe("buildCacheKey", () => {
     expect(buildCacheKey(["ab", "c"])).not.toBe(buildCacheKey(["a", "bc"]));
   });
 
+  it("does not collide when a part contains the separator", () => {
+    // A plain join makes ["a|b","c"] and ["a","b|c"] the same string, so two
+    // different key compositions would share one cached result.
+    expect(buildCacheKey(["a|b", "c"])).not.toBe(buildCacheKey(["a", "b|c"]));
+  });
+
   it("exposes sha256 for pre-hashing large parts", () => {
     expect(sha256("hello")).toHaveLength(64);
   });

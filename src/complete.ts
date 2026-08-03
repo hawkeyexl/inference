@@ -40,7 +40,6 @@ export interface CompleteValidatedOptions {
   validate?: ValidateFunction;
 }
 
-const ajv = new Ajv2020({ allErrors: true });
 const validatorCache = new WeakMap<object, ValidateFunction>();
 
 /** Compile once per schema object identity — Ajv compilation is not cheap. */
@@ -49,7 +48,13 @@ export function validatorFor(
 ): ValidateFunction {
   const cached = validatorCache.get(schema);
   if (cached) return cached;
-  const compiled = ajv.compile(schema);
+  // A fresh Ajv per distinct schema object, not one shared instance: Ajv keeps
+  // a registry keyed by `$id`, so a caller that rebuilds an equal schema object
+  // per call (spreading VERDICT_SCHEMA to override descriptions, say) misses
+  // the identity cache above and would hit "schema with key or id ... already
+  // exists" on the second compile. Instances are held only by this WeakMap, so
+  // they are collected with the schemas that own them.
+  const compiled = new Ajv2020({ allErrors: true }).compile(schema);
   validatorCache.set(schema, compiled);
   return compiled;
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -182,6 +182,26 @@ describe("runEnsemble", () => {
     expect(second.requests).toHaveLength(0);
     expect(b.map((r) => r.verdict)).toEqual(a.map((r) => r.verdict));
     expect(b.every((r) => r.cached)).toBe(true);
+  });
+
+  it("treats a cache entry of the wrong shape as a miss, not a crash", async () => {
+    // A truncated write or an entry from an older cache generation can be
+    // valid JSON without being a JudgeRun[]. JsonCache only guards parse
+    // errors, so the shape check has to happen here.
+    const dir = mkdtempSync(join(tmpdir(), "inference-judge-"));
+    writeFileSync(join(dir, "k.json"), JSON.stringify({ not: "an array" }));
+    const provider = new MockProvider([mockVerdict("pass", 0.9)]);
+    const runs = await runEnsemble({
+      provider,
+      system: "s",
+      user: "u",
+      runs: 1,
+      cache: new JsonCache<JudgeRun[]>(dir),
+      cacheKey: "k",
+    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.verdict?.match).toBe("pass");
+    expect(provider.requests).toHaveLength(1);
   });
 
   it("does not consult the cache without a key", async () => {
