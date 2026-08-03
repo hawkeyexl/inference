@@ -15,3 +15,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01001](01001-single-entry-point-and-canonical-verdict-schema.md) | One entry point, and a canonical verdict schema with an override seam |
 | [01002](01002-best-of-merge-of-three-forks.md) | Best-of merge of three drifted forks |
 | [01003](01003-in-process-local-models-via-node-llama-cpp.md) | In-process local models via node-llama-cpp, behind an async selector |
+| [01004](01004-provider-auto-detection.md) | Detect an available provider when none is specified, ending at the local model |

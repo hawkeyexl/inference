@@ -33,8 +33,16 @@ export {
 export type {
   ProviderIdentity,
   ProviderName,
+  ProviderSelector,
   ProviderSpec,
 } from "./providers/index.js";
+export {
+  DETECTION_ORDER,
+  availableProviders,
+  detectProvider,
+  resetLlamaCliProbe,
+  resetProviderDetectionWarning,
+} from "./providers/detect.js";
 
 // Concrete providers, for consumers that construct them directly
 export { AnthropicProvider } from "./providers/anthropic.js";
@@ -57,8 +65,10 @@ export {
   LLAMA_SELECTORS,
   LLAMA_TIERS,
   aliasForTier,
+  blobNameFor,
   defaultLlamaModelsDirectory,
   isLlamaSelector,
+  isModelDownloaded,
   resolveLlamaModelRef,
   tierForBudget,
   uriForTier,
