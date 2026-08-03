@@ -192,8 +192,11 @@ const consensus = await judge({ provider, system, user, runs: 3 });
 | Hugging Face URI | `hf:unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` |
 | Local file | `./models/my-model.gguf` |
 
-`auto` sizes the model to the machine, preferring free GPU VRAM and falling back to half of system
-RAM. The curated catalog is exported as `LLAMA_MODELS` if you want to inspect sizes and licenses
+`auto` sizes the model to the machine using the **larger** of free GPU VRAM and half of system RAM
+(all of RAM, when there is no GPU or the probe fails). It is the larger rather than just VRAM
+because llama.cpp offloads the layers that fit onto the GPU and keeps the rest in system RAM — a
+box with a small GPU and plenty of RAM still runs a big model well, and sizing it off VRAM alone
+would leave most of the machine idle. The curated catalog is exported as `LLAMA_MODELS` if you want to inspect sizes and licenses
 before triggering a multi-gigabyte download:
 
 | Tier | Alias | Size | IFEval |
