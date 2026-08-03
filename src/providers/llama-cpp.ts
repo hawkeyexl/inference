@@ -332,6 +332,10 @@ async function loadNodeLlamaCpp(): Promise<LlamaRuntime> {
       const ramBudget = totalmem() / 2;
       try {
         const vram = await llama.getVramState();
+        // The LARGER of the two, not VRAM in preference to RAM: llama.cpp
+        // offloads the layers that fit onto the GPU and keeps the rest in
+        // system RAM, so a small GPU beside plenty of RAM still runs a big
+        // model. Sizing off VRAM alone would idle most of such a machine.
         return Math.max(vram.free, ramBudget);
       } catch {
         // CPU-only builds and probe failures are normal, never fatal.

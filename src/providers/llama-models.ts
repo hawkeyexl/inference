@@ -195,14 +195,18 @@ export function resolveLlamaModelRef(model: string): string {
 /**
  * A bare unknown word is a typo'd alias, not a model — catch it early rather
  * than letting it reach the downloader as a doomed repo name.
+ *
+ * Accepts exactly what the error message in `resolveLlamaModelRef` promises: a
+ * recognised URI scheme, or something that names a `.gguf` file. A bare
+ * `user/repo` is deliberately NOT a model reference — it would otherwise slip
+ * past this guard and fail deep inside the downloader with a far worse
+ * message. Any real path to weights ends in `.gguf`, on every platform.
  */
 function isModelPathOrUri(model: string): boolean {
   return (
     /^(hf|huggingface):/i.test(model) ||
     /^https?:\/\//i.test(model) ||
     /^(hf|huggingface)\.co\//i.test(model) ||
-    model.endsWith(".gguf") ||
-    model.includes("/") ||
-    model.includes("\\")
+    model.endsWith(".gguf")
   );
 }

@@ -94,6 +94,25 @@ describe("resolveLlamaModelRef", () => {
     );
   });
 
+  it("rejects a bare user/repo that names no .gguf file", () => {
+    // Slipping past the guard would fail deep inside the downloader with a
+    // far worse message than this one.
+    expect(() => resolveLlamaModelRef("unsloth/some-repo")).toThrow(
+      InferenceError,
+    );
+    expect(() => resolveLlamaModelRef("C:\\models\\notes.txt")).toThrow(
+      InferenceError,
+    );
+  });
+
+  it("accepts the URI forms the error message advertises", () => {
+    expect(resolveLlamaModelRef("hf:u/r/f.gguf")).toBe("hf:u/r/f.gguf");
+    expect(resolveLlamaModelRef("https://example.com/download")).toBe(
+      "https://example.com/download",
+    );
+    expect(resolveLlamaModelRef("hf.co/u/r")).toBe("hf.co/u/r");
+  });
+
   it("rejects an unknown bare name that is neither alias nor URI nor path", () => {
     expect(() => resolveLlamaModelRef("gemma-9-nonexistent")).toThrow(
       InferenceError,
