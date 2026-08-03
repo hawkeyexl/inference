@@ -153,20 +153,26 @@ export async function resolveProviderIdentityAsync(
   }
   const tier: LlamaTier =
     model === "auto" ? await probeTier(llamaRuntimeFor(spec)) : model;
-  const alias = aliasForTier(tier);
+  return { provider, model: aliasForTier(tier) };
+}
 
-  // Warn BEFORE the download starts, not after a CI job has stalled on it.
-  const entry = LLAMA_MODELS[alias];
-  if (
-    entry &&
-    !isModelDownloaded(
-      alias,
-      spec.llamaCpp?.modelsDirectory ?? defaultLlamaModelsDirectory(),
-    )
-  ) {
-    warnPendingDownload(alias, entry.sizeBytes);
+/**
+ * Warn before a multi-gigabyte download, but only once the caller has actually
+ * committed to running.
+ *
+ * Deliberately NOT in `resolveProviderIdentityAsync`: that resolves an identity
+ * *without* constructing anything, which is exactly what a fully-cached run
+ * does — and such a run downloads nothing, so warning there announces gigabytes
+ * that never move.
+ */
+function warnIfDownloadPending(spec: ProviderSpec, model: string): void {
+  const entry = LLAMA_MODELS[model];
+  if (!entry) return;
+  const directory =
+    spec.llamaCpp?.modelsDirectory ?? defaultLlamaModelsDirectory();
+  if (!isModelDownloaded(model, directory)) {
+    warnPendingDownload(model, entry.sizeBytes);
   }
-  return { provider, model: alias };
 }
 
 /**
@@ -239,5 +245,6 @@ export async function makeProviderAsync(
   // Both halves must be threaded through: passing only the model would leave a
   // detected provider as `undefined` and throw in `makeProvider`.
   const { provider, model } = await resolveProviderIdentityAsync(spec);
+  if (provider === "llama-cpp") warnIfDownloadPending(spec, model);
   return makeProvider({ ...spec, provider, model });
 }

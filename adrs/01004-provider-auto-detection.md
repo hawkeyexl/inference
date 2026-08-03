@@ -55,19 +55,36 @@ coerced" invariant the eval tools are built on. It must always be asked for by n
 
 | Provider | Available when |
 |---|---|
-| `anthropic` | `process.env[apiKeyEnv ?? "ANTHROPIC_API_KEY"]` is non-empty |
-| `openai` | its key is non-empty **or** `baseUrl` is set (keyless local server — the rule `OpenAICompatProvider`'s constructor already applies) |
+| `anthropic` | `ANTHROPIC_API_KEY` is non-empty |
+| `openai` | `OPENAI_API_KEY` is non-empty **or** `baseUrl` is set (keyless local server — the rule `OpenAICompatProvider`'s constructor already applies) |
 | `claude-cli` | `spec.exec ?? realExec` runs `[command, "--version"]` and exits 0 |
 | `llama-cpp` | `LlamaRuntime.getMemoryBudgetBytes()` resolves |
+
+**Probing stops at the first hit**, and this matters more than it looks: the probes get an order of
+magnitude more expensive down the list. Measured, an env read is microseconds, the CLI spawn ~150ms
+and the llama binding ~850ms — and that last one initialises the llama backend and allocates GPU
+context. Probing eagerly cost ~987ms to select `anthropic` off an environment variable, on every
+construction, and touched the GPU for a provider that was never used. `availableProviders` must
+still probe everything, because reporting the full list is its whole job.
+
+**Detection reads the default key variables and ignores a custom `apiKeyEnv`.** That field is
+shared by both API providers and detection only runs when none was named, so a custom name cannot
+say which provider it belongs to. Honouring it let one custom variable satisfy both probes, and
+`anthropic` then won on priority — so a spec carrying an OpenAI key under a custom name selected
+`anthropic` and 401'd at call time. A custom `apiKeyEnv` still applies in full once a provider is
+named; it just cannot be what chooses one.
+
+The CLI probe is memoised **per command**, not globally: a spec naming a different executable asks
+a different question, and a single memo made a fallback to an absolute path inherit the bare
+command's failure.
 
 No new test seam was needed — environment variables, `ExecFn` and `LlamaRuntime` cover all four, so
 the entire matrix runs offline with no network, subprocess or weights. The llama-cpp probe is
 deliberately the same call the `auto` *model* selector already makes, so selecting it costs nothing
 extra. An empty-string key counts as absent; treating it as present just defers a 401.
 
-The Claude CLI probe is memoised per process (a spawn costs ~100 ms and detection may run per
-construction). Environment probes are not memoised: they are free, and a consumer may legitimately
-set a key part-way through a process.
+Environment probes are not memoised: they are free, and a consumer may legitimately set a key
+part-way through a process.
 
 ### Async only, and the synchronous path now throws
 
