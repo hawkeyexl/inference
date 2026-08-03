@@ -42,6 +42,34 @@ describe("realExec", () => {
     expect(result.stdout).toBe("é".repeat(50000));
   });
 
+  it("passes env overrides to the child", async () => {
+    const result = await realExec(
+      [NODE, "-e", "process.stdout.write(process.env.DOCKG_PROBE ?? 'unset')"],
+      { env: { DOCKG_PROBE: "set" } },
+    );
+    expect(result.stdout).toBe("set");
+  });
+
+  it("unsets an inherited variable when its override is undefined", async () => {
+    // Clearing inherited state (a caller stripping GIT_* before shelling out
+    // to git, say) needs unset, not empty-string — the two are not the same to
+    // most tools. Node omits undefined-valued keys from the child env.
+    process.env["INFERENCE_PROBE"] = "inherited";
+    try {
+      const result = await realExec(
+        [
+          NODE,
+          "-e",
+          "process.stdout.write('INFERENCE_PROBE' in process.env ? 'present' : 'absent')",
+        ],
+        { env: { INFERENCE_PROBE: undefined } },
+      );
+      expect(result.stdout).toBe("absent");
+    } finally {
+      delete process.env["INFERENCE_PROBE"];
+    }
+  });
+
   it("reports a spawn failure instead of throwing", async () => {
     const result = await realExec(["definitely-not-a-real-binary-xyz"]);
     expect(result.spawnError).toBeDefined();

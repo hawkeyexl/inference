@@ -46,7 +46,14 @@ export interface ExecResult {
 export interface ExecOptions {
   cwd?: string;
   timeoutMs?: number;
-  env?: Record<string, string>;
+  /**
+   * Overrides on the ambient environment. A key mapped to `undefined`
+   * *unsets* that variable for the child rather than passing it through —
+   * Node omits undefined-valued keys when it builds the child's environment.
+   * Clearing inherited state (`GIT_*`, say) needs this, so the value type is
+   * deliberately wider than `string`.
+   */
+  env?: Record<string, string | undefined>;
   /** Text piped to the child's stdin (stdin is closed after writing). */
   input?: string;
 }

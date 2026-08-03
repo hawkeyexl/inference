@@ -1,6 +1,6 @@
 {
   "name": "@hawkeyexl/inference",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Shared TypeScript LLM inference layer: schema-constrained completion across Anthropic, OpenAI-compatible, and Claude CLI providers, with caching, cost accounting, and an LLM-as-judge ensemble.",
   "type": "module",
   "main": "dist/index.js",
