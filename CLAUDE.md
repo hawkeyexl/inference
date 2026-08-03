@@ -60,9 +60,12 @@ durable — a gotcha, a decision, a convention — record it **in the repo, in t
   continues. A corrupt entry is a miss. Neither ever aborts work already paid for.
 - **The claude-cli prompt goes over stdin, never argv.** Windows caps the command line at ~32K
   characters and user content routinely exceeds it. `test/unit/claude-cli.test.ts` pins this.
-- **No network in tests.** Every code path is exercised through `MockProvider` or an injected
-  `ExecFn`. The only live test is `test/integration/live.test.ts`, gated on `ANTHROPIC_API_KEY`
-  and skipped by default.
+- **Verify against the real machine; fake only external services.** A test double is permitted
+  *only* where the thing being stood in for is a network call to a third party: a remote LLM API
+  (`MockProvider`), the Claude CLI's inference (`claude -p`, which calls Anthropic), or a Hugging
+  Face model download. **Everything else must run for real** — spawn real processes, write real
+  files in `mkdtempSync` directories, load the real `node-llama-cpp` binding, read the real
+  environment. See "Real-machine verification" below for why.
 - **Consumers own their prompts and their cache keys.** This library ships no domain prompt text
   and no `PROMPT_VERSION`. `buildCacheKey` hashes the parts the caller names; it does not decide
   what invalidates an entry.
@@ -93,6 +96,42 @@ npm run typecheck
 npm run build
 npm test
 ```
+
+## Real-machine verification (required)
+
+**Fake only what is a network call to a third party. Run everything else for real.**
+
+Permitted doubles, and nothing else:
+
+| Double | Stands in for | Why it stays |
+|---|---|---|
+| `MockProvider` | a remote LLM API | billed, rate-limited, non-deterministic |
+| a fake `ExecFn` for `claude -p` | Claude CLI **inference** | it calls Anthropic |
+| a fake `LlamaRuntime` for `prompt()` | inference over GGUF weights | needs a multi-GB Hugging Face download |
+
+Everything else runs for real, and CI runs it: spawn actual processes (`process.execPath` with a
+throwaway script proves argv, stdin, exit codes, timeouts and signal handling — see
+`test/unit/exec.test.ts`), write actual files under `mkdtempSync`, load the actual `node-llama-cpp`
+binding to probe availability, read the actual environment.
+
+**Why this is a rule and not a preference.** Ten defects shipped past a green suite on the
+local-models work, and the expensive ones were invisible *because* a fake made them free:
+
+- `detectProvider` cost ~987 ms per construction and initialised the GPU for a provider it never
+  used. Every test injected a `LlamaRuntime` whose probe returned instantly, so the cost did not
+  exist in the suite.
+- The Claude CLI probe memoised across different commands. Tests only ever passed one command.
+- The download warning fired on the fully-cached path that downloads nothing. The test called
+  identity resolution directly, so "what a real consumer does" was never exercised.
+
+A fake encodes what you already believe. It cannot contradict you, so it cannot find these. Where
+a real run is genuinely impossible in CI — it needs weights or a paid key — gate an integration
+test on an environment variable (`INFERENCE_LIVE_LLAMA`, `ANTHROPIC_API_KEY`) and **run it by hand
+before opening the PR**; a gated test still counts as verification, an un-run one does not.
+
+Assert the *contract*, not the environment, in anything that touches optional native code: a probe
+test should assert "returns a boolean and does not throw", so it stays honest on a machine where
+the binding is absent.
 
 ## Architecture Decision Records
 

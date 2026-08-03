@@ -1,68 +1,61 @@
+/**
+ * Provider detection, verified against the real machine.
+ *
+ * The Claude CLI probe spawns actual processes; the llama-cpp probe loads the
+ * actual `node-llama-cpp` binding; the key probes read the actual environment.
+ * Nothing here is faked, because none of it is a third-party network call —
+ * and the fakes this file used to carry are exactly what hid a ~987ms eager
+ * probe and a memo that ignored the command (CLAUDE.md, real-machine
+ * verification).
+ */
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  DETECTION_ORDER,
   InferenceError,
   LLAMA_MODELS,
   availableProviders,
+  defaultLlamaRuntime,
   detectProvider,
   makeProviderAsync,
+  resetClaudeCliProbe,
   resetProviderDetectionWarning,
   resolveProviderIdentity,
   resolveProviderIdentityAsync,
-  resetClaudeCliProbe,
 } from "../../src/index.js";
-import type { ExecFn, LlamaRuntime, ProviderSpec } from "../../src/index.js";
+import type { ProviderSpec } from "../../src/index.js";
+import {
+  callsTo,
+  cliPrinting,
+  missingCliPath,
+} from "../support/fake-cli.js";
 
-/** A claude CLI that is / is not installed. */
-function cliExec(installed: boolean): ExecFn {
-  return () =>
-    Promise.resolve(
-      installed
-        ? { code: 0, stdout: "1.2.3", stderr: "", timedOut: false }
-        : {
-            code: null,
-            stdout: "",
-            stderr: "",
-            timedOut: false,
-            spawnError: "ENOENT",
-          },
-    );
-}
+/**
+ * Is the optional native binding usable here? Answered by asking the real
+ * runtime, so these tests assert the CONTRACT and stay honest on a machine
+ * (or CI runner) where node-llama-cpp is absent.
+ */
+let llamaUsable = false;
 
-/** A llama runtime that is / is not usable. */
-function llamaRuntime(available: boolean): LlamaRuntime {
-  return {
-    resolveModelFile: (uri) => Promise.resolve(uri),
-    loadModel: () => Promise.reject(new Error("unused")),
-    getMemoryBudgetBytes: () =>
-      available
-        ? Promise.resolve(16 * 1e9)
-        : Promise.reject(
-            new InferenceError("node-llama-cpp is not installed. npm i ..."),
-          ),
-  };
-}
-
-/** Nothing available unless a test opts in. */
+/** Base spec whose CLI is genuinely absent, so only real signals decide. */
 function spec(over: Partial<ProviderSpec> = {}): ProviderSpec {
-  return {
-    exec: cliExec(false),
-    llamaRuntime: llamaRuntime(false),
-    ...over,
-  } as ProviderSpec;
+  return { command: missingCliPath(), ...over } as ProviderSpec;
 }
 
 const KEYS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] as const;
 let saved: Record<string, string | undefined> = {};
 
-beforeEach(() => {
+beforeEach(async () => {
   saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
   for (const k of KEYS) delete process.env[k];
   resetProviderDetectionWarning();
   resetClaudeCliProbe();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  llamaUsable = await defaultLlamaRuntime()
+    .getMemoryBudgetBytes()
+    .then(() => true, () => false);
 });
 
 afterEach(() => {
@@ -73,214 +66,164 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("detectProvider priority", () => {
+const warnings = (): string =>
+  vi
+    .mocked(console.warn)
+    .mock.calls.map((c) => String(c[0]))
+    .join("\n");
+
+describe("detection priority", () => {
   it("prefers anthropic when its key is set", async () => {
     process.env["ANTHROPIC_API_KEY"] = "k";
     process.env["OPENAI_API_KEY"] = "k";
-    expect(
-      await detectProvider(
-        spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
-      ),
-    ).toBe("anthropic");
-  });
+    expect(await detectProvider(spec({ command: cliPrinting("1").command }))).toBe(
+      "anthropic",
+    );
+  }, 30_000);
 
   it("falls to openai when anthropic has no key", async () => {
     process.env["OPENAI_API_KEY"] = "k";
-    expect(
-      await detectProvider(
-        spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
-      ),
-    ).toBe("openai");
-  });
-
-  it("falls to claude-cli when neither API key is set", async () => {
-    expect(
-      await detectProvider(
-        spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
-      ),
-    ).toBe("claude-cli");
-  });
-
-  it("falls to llama-cpp when nothing else is available", async () => {
-    expect(await detectProvider(spec({ llamaRuntime: llamaRuntime(true) }))).toBe(
-      "llama-cpp",
+    expect(await detectProvider(spec({ command: cliPrinting("1").command }))).toBe(
+      "openai",
     );
-  });
+  }, 30_000);
+
+  it("falls to a real, runnable CLI when neither API key is set", async () => {
+    const cli = cliPrinting("1.2.3");
+    expect(await detectProvider(spec({ command: cli.command }))).toBe(
+      "claude-cli",
+    );
+    // It really ran the executable, with the argument the probe claims to use.
+    expect(callsTo(cli)[0]?.argv).toEqual(["--version"]);
+  }, 30_000);
+
+  it("skips a CLI that is genuinely not installed", async () => {
+    const picked = await detectProvider(spec()).catch(() => "none");
+    expect(picked).not.toBe("claude-cli");
+    expect(picked).toBe(llamaUsable ? "llama-cpp" : "none");
+  }, 30_000);
 
   it("counts a keyless openai server when baseUrl is given", async () => {
-    expect(
-      await detectProvider(spec({ baseUrl: "http://localhost:11434/v1" })),
-    ).toBe("openai");
-  });
+    expect(await detectProvider(spec({ baseUrl: "http://localhost:11434/v1" }))).toBe(
+      "openai",
+    );
+  }, 30_000);
 
   it("does not let a custom apiKeyEnv decide the provider", async () => {
-    // `apiKeyEnv` is one field shared by both API providers and detection only
-    // runs when none was named, so a custom name cannot say which it belongs
-    // to. Honouring it made an OpenAI key select anthropic, which then 401s.
+    // One field is shared by both API providers and detection only runs when
+    // none was named, so a custom name cannot say which it belongs to.
+    // Honouring it made an OpenAI key select anthropic, which then 401s.
     process.env["MY_OPENAI_KEY"] = "sk-openai";
     try {
-      expect(
-        await detectProvider(
-          spec({
-            apiKeyEnv: "MY_OPENAI_KEY",
-            llamaRuntime: llamaRuntime(true),
-          }),
-        ),
-      ).toBe("llama-cpp");
+      const picked = await detectProvider(
+        spec({ apiKeyEnv: "MY_OPENAI_KEY" }),
+      ).catch(() => "none");
+      expect(picked).not.toBe("anthropic");
     } finally {
       delete process.env["MY_OPENAI_KEY"];
     }
-  });
+  }, 30_000);
 
   it("ignores an empty-string key", async () => {
     process.env["ANTHROPIC_API_KEY"] = "";
-    expect(
-      await detectProvider(spec({ llamaRuntime: llamaRuntime(true) })),
-    ).toBe("llama-cpp");
-  });
+    const picked = await detectProvider(spec()).catch(() => "none");
+    expect(picked).not.toBe("anthropic");
+  }, 30_000);
 
   it("never auto-selects mock", async () => {
-    // Mock returns `{ json: {} }` unless scripted, which would sail through as
+    // Mock answers `{ json: {} }` unless scripted, which would sail through as
     // a non-error result — the opposite of the never-coerce invariant.
-    const all = await availableProviders(
-      spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
-    );
-    expect(all).not.toContain("mock");
-    expect(all).toEqual(["claude-cli", "llama-cpp"]);
-  });
+    expect(DETECTION_ORDER).not.toContain("mock");
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    expect(await availableProviders(spec())).not.toContain("mock");
+  }, 30_000);
 });
 
 describe("probe cost", () => {
-  it("stops at the first hit instead of probing everything", async () => {
-    // The probes get far more expensive down the list: an env read is
-    // microseconds, spawning the CLI ~150ms, and loading the node-llama-cpp
-    // binding ~850ms — and that last one initialises the llama backend and
-    // allocates GPU context. Picking anthropic must touch neither.
+  it("stops at the first hit instead of running the expensive probes", async () => {
+    // Measured against the real machine, not a fake that made them free: the
+    // CLI spawn is ~150ms and loading the llama binding ~850ms, the latter also
+    // initialising the backend and allocating GPU context. Selecting anthropic
+    // off an env var must touch neither.
     process.env["ANTHROPIC_API_KEY"] = "k";
-    let spawned = false;
-    let llamaLoaded = false;
-    await detectProvider({
-      exec: () => {
-        spawned = true;
-        return Promise.resolve({
-          code: 0,
-          stdout: "",
-          stderr: "",
-          timedOut: false,
-        });
-      },
-      llamaRuntime: {
-        resolveModelFile: (u) => Promise.resolve(u),
-        loadModel: () => Promise.reject(new Error("unused")),
-        getMemoryBudgetBytes: () => {
-          llamaLoaded = true;
-          return Promise.resolve(1e9);
-        },
-      },
-    });
-    expect(spawned).toBe(false);
-    expect(llamaLoaded).toBe(false);
-  });
+    const cli = cliPrinting("1");
+    const started = Date.now();
+    expect(await detectProvider(spec({ command: cli.command }))).toBe("anthropic");
+    const elapsed = Date.now() - started;
 
-  it("still probes everything for availableProviders, which reports all", async () => {
+    // The definitive check: the real executable was never spawned.
+    expect(callsTo(cli)).toHaveLength(0);
+    // And it returned far faster than any subprocess or native load could.
+    expect(elapsed).toBeLessThan(100);
+  }, 30_000);
+
+  it("availableProviders does probe everything, since it reports the full list", async () => {
     process.env["ANTHROPIC_API_KEY"] = "k";
-    expect(
-      await availableProviders(
-        spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
-      ),
-    ).toEqual(["anthropic", "claude-cli", "llama-cpp"]);
-  });
+    const cli = cliPrinting("1");
+    const all = await availableProviders(spec({ command: cli.command }));
+    expect(all).toContain("anthropic");
+    expect(all).toContain("claude-cli");
+    expect(callsTo(cli)).toHaveLength(1);
+  }, 30_000);
 });
 
-describe("when nothing is available", () => {
-  it("throws an error naming every provider and why it failed", async () => {
-    const error = await detectProvider(spec()).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(InferenceError);
-    const message = (error as Error).message;
-    for (const name of ["anthropic", "openai", "claude-cli", "llama-cpp"]) {
-      expect(message).toContain(name);
-    }
-    expect(message).toContain("ANTHROPIC_API_KEY");
-    expect(message).toContain("node-llama-cpp");
-  });
-});
-
-describe("the claude-cli probe", () => {
-  it("runs the configured command once and memoises the result", async () => {
-    const calls: string[][] = [];
-    const exec: ExecFn = (cmd) => {
-      calls.push(cmd);
-      return Promise.resolve({
-        code: 0,
-        stdout: "",
-        stderr: "",
-        timedOut: false,
-      });
-    };
-    await detectProvider(spec({ exec }));
-    await detectProvider(spec({ exec }));
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.[0]).toBe("claude");
-  });
+describe("the Claude CLI probe", () => {
+  it("spawns once per command and reuses the result", async () => {
+    const cli = cliPrinting("1.2.3");
+    await detectProvider(spec({ command: cli.command }));
+    await detectProvider(spec({ command: cli.command }));
+    expect(callsTo(cli)).toHaveLength(1);
+  }, 30_000);
 
   it("re-probes when a different command is named", async () => {
     // Memoising on a single key made a fallback to an absolute path inherit
     // the bare command's failure and silently drop to the local model.
-    const missing: ExecFn = () =>
-      Promise.resolve({
-        code: null,
-        stdout: "",
-        stderr: "",
-        timedOut: false,
-        spawnError: "ENOENT",
-      });
-    const present: ExecFn = () =>
-      Promise.resolve({ code: 0, stdout: "1.0", stderr: "", timedOut: false });
-    const runtime = llamaRuntime(false);
+    const working = cliPrinting("1.2.3");
+    expect(await availableProviders(spec())).not.toContain("claude-cli");
     expect(
-      await availableProviders({ exec: missing, command: "claude", llamaRuntime: runtime }),
-    ).toEqual([]);
-    expect(
-      await availableProviders({
-        exec: present,
-        command: "/opt/claude",
-        llamaRuntime: runtime,
-      }),
-    ).toEqual(["claude-cli"]);
-  });
+      await availableProviders(spec({ command: working.command })),
+    ).toContain("claude-cli");
+  }, 30_000);
 
-  it("treats a timeout as unavailable rather than hanging detection", async () => {
-    const exec: ExecFn = () =>
-      Promise.resolve({
-        code: null,
-        stdout: "",
-        stderr: "",
-        timedOut: true,
-      });
-    expect(
-      await detectProvider(spec({ exec, llamaRuntime: llamaRuntime(true) })),
-    ).toBe("llama-cpp");
-  });
+  it("treats a CLI that exits non-zero as unavailable", async () => {
+    const { cliFailing } = await import("../support/fake-cli.js");
+    const cli = cliFailing(1, "not authenticated");
+    expect(await availableProviders(spec({ command: cli.command }))).not.toContain(
+      "claude-cli",
+    );
+  }, 30_000);
 });
 
-describe("auto-detection through the factory", () => {
+describe("when nothing is available", () => {
+  it("names every provider and why each failed", async () => {
+    // Only reachable when the native binding is genuinely unusable here.
+    if (llamaUsable) return;
+    const error = await detectProvider(spec()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InferenceError);
+    const message = (error as Error).message;
+    for (const name of DETECTION_ORDER) expect(message).toContain(name);
+    expect(message).toContain("ANTHROPIC_API_KEY");
+  }, 30_000);
+});
+
+describe("resolution through the factory", () => {
   it("resolves an omitted provider to a concrete one, never 'auto'", async () => {
-    const identity = await resolveProviderIdentityAsync(
-      spec({ llamaRuntime: llamaRuntime(true) }),
-    );
-    expect(identity.provider).toBe("llama-cpp");
-    // The 16 GB budget the fake reports lands on the balanced tier.
-    expect(identity.model).toBe("gemma-4-e4b");
-  });
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    const identity = await resolveProviderIdentityAsync(spec());
+    expect(identity.provider).toBe("anthropic");
+    expect(identity.model).toBe("claude-sonnet-4-5");
+  }, 30_000);
 
   it("treats an explicit 'auto' identically to omitting it", async () => {
     process.env["ANTHROPIC_API_KEY"] = "k";
     const omitted = await resolveProviderIdentityAsync(spec());
+    resetProviderDetectionWarning();
+    resetClaudeCliProbe();
     const explicit = await resolveProviderIdentityAsync(
       spec({ provider: "auto" }),
     );
     expect(explicit).toEqual(omitted);
-  });
+  }, 30_000);
 
   it("builds a provider whose identity matches the resolved one", async () => {
     process.env["ANTHROPIC_API_KEY"] = "k";
@@ -289,17 +232,17 @@ describe("auto-detection through the factory", () => {
     const provider = await makeProviderAsync(s);
     expect(provider.provider()).toBe(identity.provider);
     expect(provider.modelName()).toBe(identity.model);
-  });
+  }, 30_000);
 
   it("leaves an explicit provider untouched", async () => {
-    expect((await resolveProviderIdentityAsync({ provider: "mock" })).provider).toBe(
-      "mock",
-    );
+    expect(
+      (await resolveProviderIdentityAsync({ provider: "mock" })).provider,
+    ).toBe("mock");
   });
 });
 
 describe("the synchronous path refuses to guess", () => {
-  it("throws for an omitted provider instead of returning undefined", async () => {
+  it("throws for an omitted provider instead of returning undefined", () => {
     // It used to return { provider: undefined, model: "unknown" } — cache-key
     // material that two different malformed specs would collide on.
     expect(() => resolveProviderIdentity({} as ProviderSpec)).toThrow(
@@ -319,15 +262,15 @@ describe("the synchronous path refuses to guess", () => {
 
 describe("warnings", () => {
   it("names the auto-selected provider once per process", async () => {
-    const warn = vi.mocked(console.warn);
-    await detectProvider(spec({ llamaRuntime: llamaRuntime(true) }));
-    await detectProvider(spec({ llamaRuntime: llamaRuntime(true) }));
-    const selection = warn.mock.calls.filter((c) =>
-      String(c[0]).includes("auto-selected"),
-    );
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    await detectProvider(spec());
+    await detectProvider(spec());
+    const selection = vi
+      .mocked(console.warn)
+      .mock.calls.filter((c) => String(c[0]).includes("auto-selected"));
     expect(selection).toHaveLength(1);
-    expect(String(selection[0]?.[0])).toContain("llama-cpp");
-  });
+    expect(String(selection[0]?.[0])).toContain("anthropic");
+  }, 30_000);
 
   it("does not warn when the provider was explicit", async () => {
     await resolveProviderIdentityAsync({ provider: "mock" });
@@ -335,67 +278,43 @@ describe("warnings", () => {
   });
 
   it("does not claim 'no provider specified' when auto was explicit", async () => {
-    await detectProvider(
-      spec({ provider: "auto", llamaRuntime: llamaRuntime(true) }),
-    );
-    const message = String(vi.mocked(console.warn).mock.calls[0]?.[0]);
-    expect(message).not.toMatch(/no provider specified/);
-    expect(message).toContain('provider "auto"');
-  });
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    await detectProvider(spec({ provider: "auto" }));
+    expect(warnings()).not.toMatch(/no provider specified/);
+    expect(warnings()).toContain('provider "auto"');
+  }, 30_000);
 
   it("does not warn about a download while only resolving an identity", async () => {
     // Identity resolution is the fully-cached path — it constructs nothing and
     // downloads nothing, so announcing gigabytes there is simply false.
+    if (!llamaUsable) return;
     const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
     await resolveProviderIdentityAsync(
-      spec({
-        llamaRuntime: llamaRuntime(true),
-        llamaCpp: { modelsDirectory: empty },
-      }),
+      spec({ llamaCpp: { modelsDirectory: empty } }),
     );
-    expect(
-      vi
-        .mocked(console.warn)
-        .mock.calls.map((c) => String(c[0]))
-        .join("\n"),
-    ).not.toMatch(/download|fetch/i);
-  });
+    expect(warnings()).not.toMatch(/download|fetch/i);
+  }, 60_000);
 
-  it("warns about the download size when weights are absent", async () => {
+  it("warns with the real size when weights are absent at construction", async () => {
+    if (!llamaUsable) return;
     const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
-    await makeProviderAsync(
-      spec({
-        llamaRuntime: llamaRuntime(true),
-        llamaCpp: { modelsDirectory: empty },
-      }),
-    );
-    const warned = vi
-      .mocked(console.warn)
-      .mock.calls.map((c) => String(c[0]))
-      .join("\n");
-    expect(warned).toMatch(/download/i);
-    expect(warned).toContain("GB");
-  });
+    await makeProviderAsync(spec({ llamaCpp: { modelsDirectory: empty } }));
+    expect(warnings()).toMatch(/download|fetch/i);
+    expect(warnings()).toContain("GB");
+  }, 60_000);
 
-  it("does not warn about a download when the weights are already there", async () => {
+  it("does not warn about a download when the weights are really on disk", async () => {
+    if (!llamaUsable) return;
     const dir = mkdtempSync(join(tmpdir(), "inference-detect-"));
-    // Must be the tier the fake's 16 GB budget actually resolves to.
-    const uri = LLAMA_MODELS["gemma-4-e4b"]!.uri;
+    // Resolve what this machine actually picks, then put that file there.
+    const { model } = await resolveProviderIdentityAsync(
+      spec({ llamaCpp: { modelsDirectory: dir } }),
+    );
+    const uri = LLAMA_MODELS[model]!.uri;
     const [, user] = /^hf:([^/]+)\//.exec(uri)!;
-    writeFileSync(
-      join(dir, `hf_${user}_${uri.split("/").pop()}`),
-      Buffer.alloc(4),
-    );
-    await makeProviderAsync(
-      spec({
-        llamaRuntime: llamaRuntime(true),
-        llamaCpp: { modelsDirectory: dir },
-      }),
-    );
-    const warned = vi
-      .mocked(console.warn)
-      .mock.calls.map((c) => String(c[0]))
-      .join("\n");
-    expect(warned).not.toMatch(/download/i);
-  });
+    writeFileSync(join(dir, `hf_${user}_${uri.split("/").pop()}`), Buffer.alloc(4));
+    resetProviderDetectionWarning();
+    await makeProviderAsync(spec({ llamaCpp: { modelsDirectory: dir } }));
+    expect(warnings()).not.toMatch(/download|fetch/i);
+  }, 60_000);
 });

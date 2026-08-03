@@ -1,3 +1,19 @@
+/**
+ * The llama-cpp provider.
+ *
+ * The injected `LlamaRuntime` here is one of the three permitted doubles: every
+ * method on it sits downstream of a multi-gigabyte Hugging Face download, which
+ * is a third-party network integration (CLAUDE.md, real-machine verification).
+ * Real weights ARE exercised — in `test/integration/live-llama.test.ts`, gated
+ * on `INFERENCE_LIVE_LLAMA` and run by hand before opening a PR.
+ *
+ * Everything that does not need weights runs for real here: the constructor's
+ * selector rejection, model-reference resolution, and the directory the
+ * provider actually reads.
+ */
+import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   InferenceError,
@@ -6,6 +22,7 @@ import {
   completeValidatedJSON,
   defaultLlamaModelsDirectory,
   disposeLlamaModels,
+  isModelDownloaded,
 } from "../../src/index.js";
 import type {
   CompleteJSONRequest,
@@ -342,6 +359,40 @@ describe("failure handling", () => {
     });
     await expect(provider.completeJSON(REQUEST)).rejects.toThrow(
       /npm i node-llama-cpp/,
+    );
+  });
+});
+
+describe("paths that need no weights, verified for real", () => {
+  it("resolves the default models directory to a real, usable path", () => {
+    // Not a fixed string: assert the contract, so this stays honest wherever
+    // HOME points and under INFERENCE_MODELS_DIR.
+    const dir = defaultLlamaModelsDirectory();
+    expect(isAbsolute(dir)).toBe(true);
+    expect(dir).not.toContain(".node-llama-cpp");
+    // It must be creatable — the downloader depends on that.
+    mkdirSync(dir, { recursive: true });
+    expect(statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it("reads the real directory when deciding whether weights are present", () => {
+    const dir = mkdtempSync(join(tmpdir(), "inference-provider-"));
+    expect(isModelDownloaded("gemma-4-e4b", dir)).toBe(false);
+    const uri = LLAMA_MODELS["gemma-4-e4b"]!.uri;
+    const [, user] = /^hf:([^/]+)\//.exec(uri)!;
+    writeFileSync(join(dir, `hf_${user}_${uri.split("/").pop()}`), Buffer.alloc(4));
+    expect(isModelDownloaded("gemma-4-e4b", dir)).toBe(true);
+  });
+
+  it("rejects a selector at construction without touching any runtime", () => {
+    // No runtime injected at all: if construction consulted one, this would
+    // load the native binding instead of throwing.
+    expect(() => new LlamaCppProvider("auto")).toThrow(/makeProviderAsync/);
+  });
+
+  it("rejects an unknown model reference before any download is attempted", () => {
+    expect(() => new LlamaCppProvider("gemma-9-nope")).toThrow(
+      /Unknown llama-cpp model/,
     );
   });
 });

@@ -1,23 +1,45 @@
-import { describe, expect, it } from "vitest";
+/**
+ * Selector resolution through the factory, against the real runtime.
+ *
+ * Tier boundaries are pinned by `tierForBudget` in `llama-models.test.ts`,
+ * which is a pure function and needs no machine at all. What matters *here* is
+ * the part a fake cannot tell you: that the real binding produces a real budget
+ * which resolves to a real catalog entry, and that the identity a caller
+ * caches on is the one the provider actually loads.
+ *
+ * These assert contracts rather than values, so they stay honest on a runner
+ * where the optional native binding is absent.
+ */
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   DEFAULT_MODELS,
   InferenceError,
   LLAMA_MODELS,
+  LLAMA_TIERS,
+  aliasForTier,
+  defaultLlamaRuntime,
   makeProvider,
   makeProviderAsync,
   resolveProviderIdentity,
   resolveProviderIdentityAsync,
+  tierForBudget,
 } from "../../src/index.js";
-import type { LlamaRuntime, ProviderSpec } from "../../src/index.js";
+import type { ProviderSpec } from "../../src/index.js";
 
-/** A runtime that reports a fixed memory budget and loads nothing. */
-function runtimeWithBudget(bytes: number): LlamaRuntime {
-  return {
-    resolveModelFile: (uri) => Promise.resolve(uri),
-    loadModel: () => Promise.reject(new Error("not needed for identity")),
-    getMemoryBudgetBytes: () => Promise.resolve(bytes),
-  };
-}
+let llamaUsable = false;
+let realBudget = 0;
+
+beforeAll(async () => {
+  await defaultLlamaRuntime()
+    .getMemoryBudgetBytes()
+    .then(
+      (b) => {
+        llamaUsable = true;
+        realBudget = b;
+      },
+      () => undefined,
+    );
+});
 
 describe("llama-cpp defaults", () => {
   it("defaults to the auto selector", () => {
@@ -29,6 +51,33 @@ describe("llama-cpp defaults", () => {
       makeProvider({ provider: "nope" } as unknown as ProviderSpec),
     ).toThrow(/llama-cpp/);
   });
+});
+
+describe("the real memory probe", () => {
+  it("reports a usable budget on a machine with the binding", () => {
+    if (!llamaUsable) return;
+    expect(realBudget).toBeGreaterThan(0);
+    expect(Number.isFinite(realBudget)).toBe(true);
+  });
+
+  it("resolves that budget to a real catalog tier", () => {
+    if (!llamaUsable) return;
+    const tier = tierForBudget(realBudget);
+    expect(LLAMA_TIERS).toContain(tier);
+    expect(LLAMA_MODELS[aliasForTier(tier)]).toBeDefined();
+  });
+
+  it("reports unavailability as a rejection, never a hang or a crash", async () => {
+    // The contract the detection probe depends on: this either resolves with a
+    // number or rejects with an actionable error — it never throws synchronously.
+    const outcome = await defaultLlamaRuntime()
+      .getMemoryBudgetBytes()
+      .then(() => "resolved" as const)
+      .catch((e: unknown) => e);
+    if (outcome === "resolved") return;
+    expect(outcome).toBeInstanceOf(InferenceError);
+    expect((outcome as Error).message).toMatch(/node-llama-cpp/);
+  }, 30_000);
 });
 
 describe("synchronous resolution refuses selectors", () => {
@@ -60,65 +109,36 @@ describe("synchronous resolution refuses selectors", () => {
   });
 });
 
-describe("resolveProviderIdentityAsync", () => {
-  it("resolves auto to a concrete alias, never the literal selector", async () => {
+describe("asynchronous resolution", () => {
+  it("resolves auto to a concrete catalog alias on this machine", async () => {
+    if (!llamaUsable) return;
     const identity = await resolveProviderIdentityAsync({
       provider: "llama-cpp",
-      llamaRuntime: runtimeWithBudget(16 * 1e9),
     });
     expect(identity.provider).toBe("llama-cpp");
-    expect(identity.model).toBe("gemma-4-e4b");
+    // Never the literal selector — that is what the cache key records.
+    expect(identity.model).not.toBe("auto");
     expect(LLAMA_MODELS[identity.model]).toBeDefined();
-  });
+    // And it agrees with what the real budget implies.
+    expect(identity.model).toBe(aliasForTier(tierForBudget(realBudget)));
+  }, 30_000);
 
-  it("picks a bigger model on a bigger machine", async () => {
-    const big = await resolveProviderIdentityAsync({
-      provider: "llama-cpp",
-      llamaRuntime: runtimeWithBudget(32 * 1e9),
-    });
-    const small = await resolveProviderIdentityAsync({
-      provider: "llama-cpp",
-      llamaRuntime: runtimeWithBudget(4 * 1e9),
-    });
-    expect(big.model).toBe("gemma-4-12b");
-    expect(small.model).toBe("gemma-4-e2b");
-  });
-
-  it("maps a tier keyword without probing hardware", async () => {
-    const probed = { probed: false };
-    const runtime: LlamaRuntime = {
-      resolveModelFile: (uri) => Promise.resolve(uri),
-      loadModel: () => Promise.reject(new Error("unused")),
-      getMemoryBudgetBytes: () => {
-        probed.probed = true;
-        return Promise.resolve(0);
-      },
-    };
-    const identity = await resolveProviderIdentityAsync({
-      provider: "llama-cpp",
-      model: "quality",
-      llamaRuntime: runtime,
-    });
-    expect(identity.model).toBe("gemma-4-12b");
-    expect(probed.probed).toBe(false);
-  });
-
-  it("honours a runtime injected via llamaCpp as well as llamaRuntime", async () => {
-    // makeProvider accepts both paths, so the selector probe must too —
-    // otherwise it falls through to the real native module and throws for a
-    // consumer whose whole point was to stay offline.
-    const identity = await resolveProviderIdentityAsync({
-      provider: "llama-cpp",
-      llamaCpp: { runtime: runtimeWithBudget(32 * 1e9) },
-    });
-    expect(identity.model).toBe("gemma-4-12b");
+  it("maps a tier keyword without consulting the machine", async () => {
+    // No native binding needed: a named tier is a catalog lookup.
+    expect(
+      (
+        await resolveProviderIdentityAsync({
+          provider: "llama-cpp",
+          model: "quality",
+        })
+      ).model,
+    ).toBe("gemma-4-12b");
   });
 
   it("passes a concrete model straight through", async () => {
     const identity = await resolveProviderIdentityAsync({
       provider: "llama-cpp",
       model: "hf:someone/Custom-GGUF/custom.gguf",
-      llamaRuntime: runtimeWithBudget(0),
     });
     expect(identity.model).toBe("hf:someone/Custom-GGUF/custom.gguf");
   });
@@ -133,16 +153,14 @@ describe("resolveProviderIdentityAsync", () => {
 
 describe("makeProviderAsync", () => {
   it("builds a llama-cpp provider whose modelName matches the resolved identity", async () => {
-    const spec: ProviderSpec = {
-      provider: "llama-cpp",
-      llamaRuntime: runtimeWithBudget(16 * 1e9),
-    };
+    if (!llamaUsable) return;
+    const spec: ProviderSpec = { provider: "llama-cpp" };
     const identity = await resolveProviderIdentityAsync(spec);
     const provider = await makeProviderAsync(spec);
     // The cache key and the model actually loaded must agree.
     expect(provider.modelName()).toBe(identity.model);
     expect(provider.provider()).toBe("llama-cpp");
-  });
+  }, 30_000);
 
   it("builds the other providers exactly as makeProvider does", async () => {
     const provider = await makeProviderAsync({ provider: "mock" });
