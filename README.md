@@ -162,13 +162,22 @@ const options  = await availableProviders();           // ["claude-cli", "llama-
 
 | Order | Available when |
 |---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` (or your `apiKeyEnv`) is non-empty |
-| `openai` | its key is non-empty, **or** `baseUrl` is set (keyless local server) |
+| `anthropic` | `ANTHROPIC_API_KEY` is non-empty |
+| `openai` | `OPENAI_API_KEY` is non-empty, **or** `baseUrl` is set (keyless local server) |
 | `claude-cli` | `claude --version` runs and exits 0 |
 | `llama-cpp` | `node-llama-cpp` is installed |
 
 `mock` is never auto-selected — it answers `{ json: {} }` unless scripted, which would pass as a
 real result. Ask for it by name.
+
+Probing stops at the first hit, because the probes get much more expensive down the list: reading an
+environment variable is microseconds, spawning the CLI ~150 ms, and loading the llama binding
+~850 ms — and that last one initialises the llama backend. `availableProviders()` necessarily runs
+them all, so prefer `makeProviderAsync` on a hot path.
+
+Detection reads the **default** key variables and ignores a custom `apiKeyEnv`: one field is shared
+by both API providers, so a custom name cannot say which provider it belongs to. Name the
+`provider` explicitly when you use one. (`apiKeyEnv` still applies in full once a provider is named.)
 
 Detection is **async**, because probing the CLI and the local runtime is. The synchronous
 `makeProvider`/`resolveProviderIdentity` therefore throw when `provider` is missing or `"auto"`,
@@ -323,7 +332,7 @@ Everything exports from the package root.
 
 **Providers** — `makeProvider`, `makeProviderAsync`, `resolveProviderIdentity`,
 `resolveProviderIdentityAsync`, `detectProvider`, `availableProviders`, `DETECTION_ORDER`,
-`resetProviderDetectionWarning`, `resetLlamaCliProbe`,
+`resetProviderDetectionWarning`, `resetClaudeCliProbe`,
 `DEFAULT_MODELS`, `DEFAULT_OPENAI_BASE_URL`, `AnthropicProvider`,
 `OpenAICompatProvider`, `ClaudeCliProvider`, `LlamaCppProvider`, `MockProvider`, `mockVerdict`,
 `extractJson`, `toStrictSchema`, `stripNulls`, `realExec`

@@ -39,30 +39,50 @@ interface Probe {
   reason?: string;
 }
 
-function hasKey(spec: ProviderSpec, provider: "anthropic" | "openai"): boolean {
-  const name = spec.apiKeyEnv ?? DEFAULT_KEY_ENV[provider]!;
+/**
+ * Probes the provider's DEFAULT key variable, deliberately ignoring
+ * `spec.apiKeyEnv`.
+ *
+ * `apiKeyEnv` is one field shared by both API providers, and detection only
+ * runs when no provider was named — so a custom name cannot say which provider
+ * it belongs to. Honouring it here made a single custom variable satisfy both
+ * probes, and anthropic then won on priority: a spec carrying an OpenAI key
+ * under a custom name selected `anthropic` and 401'd at call time.
+ *
+ * A custom `apiKeyEnv` still applies in full once a provider is named — it just
+ * cannot be what chooses one.
+ */
+function hasKey(provider: "anthropic" | "openai"): boolean {
   // An empty string is not a key; treating it as one produces a 401 later.
-  return (process.env[name] ?? "") !== "";
+  return (process.env[DEFAULT_KEY_ENV[provider]!] ?? "") !== "";
 }
 
 /**
- * Memoised: spawning a process costs ~100ms and detection may run per provider
- * construction. Environment probes stay unmemoised — they are free, and a
- * consumer may legitimately set a key part-way through a process.
+ * Memoised **per command**: spawning a process costs ~150ms and detection may
+ * run on every provider construction, but a spec naming a different executable
+ * is a different question — memoising on one key would make a fallback to an
+ * absolute path silently inherit the bare command's failure.
+ *
+ * Environment probes stay unmemoised: they are free, and a consumer may
+ * legitimately set a key part-way through a process.
  */
-let cliProbe: Promise<boolean> | undefined;
+const cliProbes = new Map<string, Promise<boolean>>();
 
-/** Test seam: forget the memoised Claude CLI probe. */
-export function resetLlamaCliProbe(): void {
-  cliProbe = undefined;
+/** Test seam: forget the memoised Claude CLI probes. */
+export function resetClaudeCliProbe(): void {
+  cliProbes.clear();
 }
 
 function probeClaudeCli(spec: ProviderSpec): Promise<boolean> {
   const exec = spec.exec ?? realExec;
   const command = spec.command ?? "claude";
-  return (cliProbe ??= exec([command, "--version"], { timeoutMs: 10_000 })
+  const cached = cliProbes.get(command);
+  if (cached) return cached;
+  const probing = exec([command, "--version"], { timeoutMs: 10_000 })
     .then((r) => r.code === 0 && !r.timedOut && r.spawnError == null)
-    .catch(() => false));
+    .catch(() => false);
+  cliProbes.set(command, probing);
+  return probing;
 }
 
 function probeLlamaCpp(spec: ProviderSpec): Promise<Probe> {
@@ -90,20 +110,20 @@ async function probe(
 ): Promise<Probe> {
   switch (provider) {
     case "anthropic":
-      return hasKey(spec, "anthropic")
+      return hasKey("anthropic")
         ? { available: true }
         : {
             available: false,
-            reason: `${spec.apiKeyEnv ?? "ANTHROPIC_API_KEY"} is not set`,
+            reason: `ANTHROPIC_API_KEY is not set`,
           };
     case "openai":
       // A local OpenAI-compatible server needs no key — same rule the
       // OpenAICompatProvider constructor applies.
-      return hasKey(spec, "openai") || spec.baseUrl
+      return hasKey("openai") || spec.baseUrl
         ? { available: true }
         : {
             available: false,
-            reason: `${spec.apiKeyEnv ?? "OPENAI_API_KEY"} is not set and no baseUrl was given`,
+            reason: `OPENAI_API_KEY is not set and no baseUrl was given`,
           };
     case "claude-cli":
       return (await probeClaudeCli(spec))
@@ -144,20 +164,24 @@ export async function availableProviders(
 export async function detectProvider(
   spec: ProviderSpec = {},
 ): Promise<ProviderName> {
-  const probes = await Promise.all(
-    DETECTION_ORDER.map((name) => probe(name, spec)),
-  );
-  const index = probes.findIndex((p) => p.available);
-  if (index >= 0) {
-    const chosen = DETECTION_ORDER[index]!;
-    warnSelected(chosen);
-    return chosen;
+  // Sequential, not Promise.all: the probes get dramatically more expensive
+  // down the list, and the cheapest usually wins. Reading an environment
+  // variable costs microseconds, spawning the Claude CLI ~150ms, and loading
+  // the node-llama-cpp binding ~850ms — the last of which also initialises the
+  // llama backend and allocates GPU context. Probing eagerly would pay all of
+  // that on every construction just to pick `anthropic` off an env var, and
+  // would touch the GPU for a provider that is never used.
+  const reasons: string[] = [];
+  for (const name of DETECTION_ORDER) {
+    const result = await probe(name, spec);
+    if (result.available) {
+      warnSelected(name, spec.provider === "auto");
+      return name;
+    }
+    reasons.push(`  ${name.padEnd(10)} — ${result.reason}`);
   }
-  const lines = DETECTION_ORDER.map(
-    (name, i) => `  ${name.padEnd(10)} — ${probes[i]!.reason}`,
-  ).join("\n");
   throw new InferenceError(
-    `No inference provider is available. Tried:\n${lines}\n` +
+    `No inference provider is available. Tried:\n${reasons.join("\n")}\n` +
       `Pass an explicit \`provider\`, set one of the keys above, or install node-llama-cpp.`,
   );
 }
@@ -176,11 +200,14 @@ export function resetProviderDetectionWarning(): void {
  * environment variable moved is a run whose verdicts and cache are no longer
  * comparable to the last one. Say which provider was picked, once.
  */
-function warnSelected(provider: ProviderName): void {
+function warnSelected(provider: ProviderName, wasExplicitAuto: boolean): void {
   if (warnedSelection) return;
   warnedSelection = true;
+  // `provider: "auto"` IS a specification — saying otherwise sends someone
+  // hunting their config for a field they did set.
+  const because = wasExplicitAuto ? `provider "auto"` : "no provider specified";
   console.warn(
-    `inference: no provider specified — auto-selected "${provider}". ` +
+    `inference: ${because} — auto-selected "${provider}". ` +
       `Pass an explicit \`provider\` to pin it.`,
   );
 }

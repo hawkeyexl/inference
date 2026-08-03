@@ -40,7 +40,7 @@ export {
   DETECTION_ORDER,
   availableProviders,
   detectProvider,
-  resetLlamaCliProbe,
+  resetClaudeCliProbe,
   resetProviderDetectionWarning,
 } from "./providers/detect.js";
 

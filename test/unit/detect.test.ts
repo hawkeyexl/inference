@@ -11,7 +11,7 @@ import {
   resetProviderDetectionWarning,
   resolveProviderIdentity,
   resolveProviderIdentityAsync,
-  resetLlamaCliProbe,
+  resetClaudeCliProbe,
 } from "../../src/index.js";
 import type { ExecFn, LlamaRuntime, ProviderSpec } from "../../src/index.js";
 
@@ -61,7 +61,7 @@ beforeEach(() => {
   saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
   for (const k of KEYS) delete process.env[k];
   resetProviderDetectionWarning();
-  resetLlamaCliProbe();
+  resetClaudeCliProbe();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -113,14 +113,22 @@ describe("detectProvider priority", () => {
     ).toBe("openai");
   });
 
-  it("honours a custom apiKeyEnv", async () => {
-    process.env["MY_KEY"] = "k";
+  it("does not let a custom apiKeyEnv decide the provider", async () => {
+    // `apiKeyEnv` is one field shared by both API providers and detection only
+    // runs when none was named, so a custom name cannot say which it belongs
+    // to. Honouring it made an OpenAI key select anthropic, which then 401s.
+    process.env["MY_OPENAI_KEY"] = "sk-openai";
     try {
-      expect(await detectProvider(spec({ apiKeyEnv: "MY_KEY" }))).toBe(
-        "anthropic",
-      );
+      expect(
+        await detectProvider(
+          spec({
+            apiKeyEnv: "MY_OPENAI_KEY",
+            llamaRuntime: llamaRuntime(true),
+          }),
+        ),
+      ).toBe("llama-cpp");
     } finally {
-      delete process.env["MY_KEY"];
+      delete process.env["MY_OPENAI_KEY"];
     }
   });
 
@@ -139,6 +147,48 @@ describe("detectProvider priority", () => {
     );
     expect(all).not.toContain("mock");
     expect(all).toEqual(["claude-cli", "llama-cpp"]);
+  });
+});
+
+describe("probe cost", () => {
+  it("stops at the first hit instead of probing everything", async () => {
+    // The probes get far more expensive down the list: an env read is
+    // microseconds, spawning the CLI ~150ms, and loading the node-llama-cpp
+    // binding ~850ms — and that last one initialises the llama backend and
+    // allocates GPU context. Picking anthropic must touch neither.
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    let spawned = false;
+    let llamaLoaded = false;
+    await detectProvider({
+      exec: () => {
+        spawned = true;
+        return Promise.resolve({
+          code: 0,
+          stdout: "",
+          stderr: "",
+          timedOut: false,
+        });
+      },
+      llamaRuntime: {
+        resolveModelFile: (u) => Promise.resolve(u),
+        loadModel: () => Promise.reject(new Error("unused")),
+        getMemoryBudgetBytes: () => {
+          llamaLoaded = true;
+          return Promise.resolve(1e9);
+        },
+      },
+    });
+    expect(spawned).toBe(false);
+    expect(llamaLoaded).toBe(false);
+  });
+
+  it("still probes everything for availableProviders, which reports all", async () => {
+    process.env["ANTHROPIC_API_KEY"] = "k";
+    expect(
+      await availableProviders(
+        spec({ exec: cliExec(true), llamaRuntime: llamaRuntime(true) }),
+      ),
+    ).toEqual(["anthropic", "claude-cli", "llama-cpp"]);
   });
 });
 
@@ -171,6 +221,32 @@ describe("the claude-cli probe", () => {
     await detectProvider(spec({ exec }));
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[0]).toBe("claude");
+  });
+
+  it("re-probes when a different command is named", async () => {
+    // Memoising on a single key made a fallback to an absolute path inherit
+    // the bare command's failure and silently drop to the local model.
+    const missing: ExecFn = () =>
+      Promise.resolve({
+        code: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        spawnError: "ENOENT",
+      });
+    const present: ExecFn = () =>
+      Promise.resolve({ code: 0, stdout: "1.0", stderr: "", timedOut: false });
+    const runtime = llamaRuntime(false);
+    expect(
+      await availableProviders({ exec: missing, command: "claude", llamaRuntime: runtime }),
+    ).toEqual([]);
+    expect(
+      await availableProviders({
+        exec: present,
+        command: "/opt/claude",
+        llamaRuntime: runtime,
+      }),
+    ).toEqual(["claude-cli"]);
   });
 
   it("treats a timeout as unavailable rather than hanging detection", async () => {
@@ -258,9 +334,36 @@ describe("warnings", () => {
     expect(vi.mocked(console.warn)).not.toHaveBeenCalled();
   });
 
-  it("warns about the download size when weights are absent", async () => {
+  it("does not claim 'no provider specified' when auto was explicit", async () => {
+    await detectProvider(
+      spec({ provider: "auto", llamaRuntime: llamaRuntime(true) }),
+    );
+    const message = String(vi.mocked(console.warn).mock.calls[0]?.[0]);
+    expect(message).not.toMatch(/no provider specified/);
+    expect(message).toContain('provider "auto"');
+  });
+
+  it("does not warn about a download while only resolving an identity", async () => {
+    // Identity resolution is the fully-cached path — it constructs nothing and
+    // downloads nothing, so announcing gigabytes there is simply false.
     const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
     await resolveProviderIdentityAsync(
+      spec({
+        llamaRuntime: llamaRuntime(true),
+        llamaCpp: { modelsDirectory: empty },
+      }),
+    );
+    expect(
+      vi
+        .mocked(console.warn)
+        .mock.calls.map((c) => String(c[0]))
+        .join("\n"),
+    ).not.toMatch(/download|fetch/i);
+  });
+
+  it("warns about the download size when weights are absent", async () => {
+    const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
+    await makeProviderAsync(
       spec({
         llamaRuntime: llamaRuntime(true),
         llamaCpp: { modelsDirectory: empty },
@@ -283,7 +386,7 @@ describe("warnings", () => {
       join(dir, `hf_${user}_${uri.split("/").pop()}`),
       Buffer.alloc(4),
     );
-    await resolveProviderIdentityAsync(
+    await makeProviderAsync(
       spec({
         llamaRuntime: llamaRuntime(true),
         llamaCpp: { modelsDirectory: dir },
