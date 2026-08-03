@@ -7,11 +7,13 @@
  * clearing THAT would destroy models this library never downloaded; owning a
  * directory removes the hazard rather than defending against it.
  */
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
+  blobNameFor,
   defaultLlamaModelsDirectory,
-  resolveLlamaModelRef,
+  listModelDirectory,
+  matchesModelBlob,
 } from "./llama-models.js";
 import { disposeLlamaModels } from "./llama-cpp.js";
 
@@ -55,11 +57,13 @@ export async function clearLlamaModels(
   if (!dryRun) await disposeLlamaModels();
 
   const files: ClearedModelFile[] = [];
-  for (const entry of listFiles(directory)) {
+  for (const entry of listModelDirectory(directory)) {
     // Only ever weights — a stray config or log in this directory is safe, and
     // so is anything else if `directory` was pointed somewhere shared.
     if (!isModelBlob(entry)) continue;
-    if (wanted && !wanted.some((name) => matchesModel(entry, name))) continue;
+    if (wanted && !wanted.some((name) => matchesModelBlob(entry, name))) {
+      continue;
+    }
     const path = join(directory, entry);
     const sizeBytes = sizeOf(path);
     if (sizeBytes === undefined) continue;
@@ -83,50 +87,8 @@ export async function clearLlamaModels(
   };
 }
 
-/**
- * The catalog's pinned filename for a model reference.
- *
- * Strips a `#branch` fragment (node-llama-cpp accepts
- * `hf:user/repo/file.gguf#branch`) and splits on both separators, so a Windows
- * path resolves too. Getting either wrong makes a selective clear silently
- * match nothing and report freeing zero bytes.
- */
-function blobNameFor(model: string): string {
-  const ref = resolveLlamaModelRef(model).split("#")[0]!;
-  return ref.split(/[/\\]/).pop()!;
-}
-
 function isModelBlob(entry: string): boolean {
   return entry.endsWith(".gguf") || entry.endsWith(".gguf.ipull");
-}
-
-/**
- * node-llama-cpp prefixes downloads with `hf_<user>_`, so match by SUFFIX
- * rather than equality — that survives a change to their naming scheme.
- */
-function matchesModel(entry: string, blobName: string): boolean {
-  const base = entry.replace(/\.ipull$/, "");
-  if (base.endsWith(blobName)) return true;
-  // Split models land as `<stem>-00001-of-00003.gguf`; every part belongs to
-  // the same model, so matching the stem removes the whole set.
-  const stem = blobName.replace(/\.gguf$/, "");
-  return new RegExp(`${escapeRegExp(stem)}-\\d{5}-of-\\d{5}\\.gguf$`).test(base);
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Top level only — a nested directory is not ours to walk. */
-function listFiles(directory: string): string[] {
-  try {
-    return readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .map((entry) => entry.name);
-  } catch {
-    // No directory means nothing was ever downloaded — not an error.
-    return [];
-  }
 }
 
 function sizeOf(path: string): number | undefined {

@@ -17,6 +17,7 @@
  * must not download. A pinned path also cannot silently re-point underneath a
  * cache key that already claims it.
  */
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { InferenceError } from "../types.js";
@@ -190,6 +191,63 @@ export function resolveLlamaModelRef(model: string): string {
       ", ",
     )}), an hf: URI, or a path to a .gguf file.`,
   );
+}
+
+/**
+ * The catalog's pinned filename for a model reference.
+ *
+ * Strips a `#branch` fragment (node-llama-cpp accepts
+ * `hf:user/repo/file.gguf#branch`) and splits on both separators, so a Windows
+ * path resolves too. Getting either wrong makes callers silently match nothing.
+ */
+export function blobNameFor(model: string): string {
+  const ref = resolveLlamaModelRef(model).split("#")[0]!;
+  return ref.split(/[/\\]/).pop()!;
+}
+
+/**
+ * Does an on-disk entry belong to this model?
+ *
+ * node-llama-cpp prefixes downloads with `hf_<user>_`, so match by SUFFIX
+ * rather than equality — that survives a change to their naming scheme.
+ */
+export function matchesModelBlob(entry: string, blobName: string): boolean {
+  const base = entry.replace(/\.ipull$/, "");
+  if (base.endsWith(blobName)) return true;
+  // Split models land as `<stem>-00001-of-00003.gguf`; every part belongs to
+  // the same model, so matching the stem covers the whole set.
+  const stem = blobName.replace(/\.gguf$/, "");
+  return new RegExp(`${escapeRegExp(stem)}-\\d{5}-of-\\d{5}\\.gguf$`).test(base);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Are this model's weights already on disk?
+ *
+ * A `.ipull` partial counts as NOT downloaded: it cannot be loaded, so
+ * treating it as present would skip the download warning and then stall on a
+ * download anyway.
+ */
+export function isModelDownloaded(model: string, directory: string): boolean {
+  const blobName = blobNameFor(model);
+  return listModelDirectory(directory).some(
+    (entry) => !entry.endsWith(".ipull") && matchesModelBlob(entry, blobName),
+  );
+}
+
+/** Top level only — a nested directory is not ours to walk. */
+export function listModelDirectory(directory: string): string[] {
+  try {
+    return readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+  } catch {
+    // No directory means nothing was ever downloaded — not an error.
+    return [];
+  }
 }
 
 /**

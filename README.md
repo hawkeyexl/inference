@@ -130,7 +130,8 @@ config into it rather than passing your config object (see
 
 ```ts
 interface ProviderSpec {
-  provider: "anthropic" | "openai" | "claude-cli" | "llama-cpp" | "mock";
+  // omitted or "auto" -> detect one (see below)
+  provider?: "anthropic" | "openai" | "claude-cli" | "llama-cpp" | "mock" | "auto";
   model?: string | null;      // null/undefined -> per-provider default
   apiKeyEnv?: string | null;  // default ANTHROPIC_API_KEY / OPENAI_API_KEY
   baseUrl?: string;           // openai only, default https://api.openai.com/v1
@@ -148,6 +149,38 @@ interface ProviderSpec {
 
 `resolveProviderIdentity(spec)` returns `{ provider, model }` **without constructing anything** —
 cache keys and pricing need the identity, but a fully-cached run should not require an API key.
+
+### Auto-detection
+
+Omit `provider` (or pass `"auto"`) and the library picks the highest-priority one this machine can
+actually use, ending at the local model — so it works with no API keys at all:
+
+```ts
+const provider = await makeProviderAsync({});          // detects
+const options  = await availableProviders();           // ["claude-cli", "llama-cpp"]
+```
+
+| Order | Available when |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` (or your `apiKeyEnv`) is non-empty |
+| `openai` | its key is non-empty, **or** `baseUrl` is set (keyless local server) |
+| `claude-cli` | `claude --version` runs and exits 0 |
+| `llama-cpp` | `node-llama-cpp` is installed |
+
+`mock` is never auto-selected — it answers `{ json: {} }` unless scripted, which would pass as a
+real result. Ask for it by name.
+
+Detection is **async**, because probing the CLI and the local runtime is. The synchronous
+`makeProvider`/`resolveProviderIdentity` therefore throw when `provider` is missing or `"auto"`,
+rather than emitting an identity that isn't concrete — the same rule the `auto` *model* selector
+follows, and for the same cache-key reason.
+
+Two one-time warnings: which provider was auto-selected (an env var moving between runs otherwise
+silently changes what an eval measured), and — if `llama-cpp` wins and its weights are absent — the
+model and download size, before the download starts.
+
+When nothing is available the error names every provider and why each failed, e.g. `anthropic —
+ANTHROPIC_API_KEY is not set`.
 
 Notes on the non-obvious bits:
 
@@ -289,13 +322,16 @@ Script an error with `{ error: "429 rate limited" }` to exercise your failure pa
 Everything exports from the package root.
 
 **Providers** — `makeProvider`, `makeProviderAsync`, `resolveProviderIdentity`,
-`resolveProviderIdentityAsync`, `DEFAULT_MODELS`, `DEFAULT_OPENAI_BASE_URL`, `AnthropicProvider`,
+`resolveProviderIdentityAsync`, `detectProvider`, `availableProviders`, `DETECTION_ORDER`,
+`resetProviderDetectionWarning`, `resetLlamaCliProbe`,
+`DEFAULT_MODELS`, `DEFAULT_OPENAI_BASE_URL`, `AnthropicProvider`,
 `OpenAICompatProvider`, `ClaudeCliProvider`, `LlamaCppProvider`, `MockProvider`, `mockVerdict`,
 `extractJson`, `toStrictSchema`, `stripNulls`, `realExec`
 
 **Local models** — `LLAMA_MODELS`, `LLAMA_SELECTORS`, `LLAMA_TIERS`, `aliasForTier`,
 `isLlamaSelector`, `resolveLlamaModelRef`, `tierForBudget`, `uriForTier`, `defaultLlamaRuntime`,
-`disposeLlamaModels`, `clearLlamaModels`, `defaultLlamaModelsDirectory`
+`disposeLlamaModels`, `clearLlamaModels`, `defaultLlamaModelsDirectory`, `isModelDownloaded`,
+`blobNameFor`
 
 **Completion** — `completeValidatedJSON`, `validatorFor`
 
@@ -308,7 +344,7 @@ Everything exports from the package root.
 
 **Errors** — `InferenceError` (operational failures: missing key, unknown provider)
 
-Types: `InferenceProvider`, `ProviderSpec`, `ProviderName`, `ProviderIdentity`,
+Types: `InferenceProvider`, `ProviderSpec`, `ProviderName`, `ProviderSelector`, `ProviderIdentity`,
 `CompleteJSONRequest`, `CompleteJSONResponse`, `InferenceRun`, `TokenUsage`, `Pricing`, `JudgeRun`,
 `JudgeVerdict`, `ConsensusResult`, `Match`, `Zone`, `ZoneThresholds`, `EnsembleOptions`, `ExecFn`,
 `ExecResult`, `ExecOptions`, `MockResponse`, `LlamaCppProviderOptions`, `LlamaRuntime`,
@@ -328,6 +364,8 @@ Recorded as ADRs in [adrs/](adrs):
   losing variants are not reintroduced
 - [01003](adrs/01003-in-process-local-models-via-node-llama-cpp.md) — in-process local models via
   node-llama-cpp, why selectors need an async factory, and why the catalog pins exact blob paths
+- [01004](adrs/01004-provider-auto-detection.md) — detecting an available provider when none is
+  specified, the priority order, and why `mock` is excluded from it
 
 ## License
 

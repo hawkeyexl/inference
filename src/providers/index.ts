@@ -13,7 +13,15 @@ import { OpenAICompatProvider } from "./openai-compat.js";
 import { ClaudeCliProvider } from "./claude-cli.js";
 import { MockProvider } from "./mock.js";
 import { LlamaCppProvider, defaultLlamaRuntime } from "./llama-cpp.js";
-import { aliasForTier, isLlamaSelector, tierForBudget } from "./llama-models.js";
+import {
+  LLAMA_MODELS,
+  aliasForTier,
+  defaultLlamaModelsDirectory,
+  isLlamaSelector,
+  isModelDownloaded,
+  tierForBudget,
+} from "./llama-models.js";
+import { detectProvider, warnPendingDownload } from "./detect.js";
 import type { AnthropicProviderOptions } from "./anthropic.js";
 import type { OpenAICompatProviderOptions } from "./openai-compat.js";
 import type { MockResponse } from "./mock.js";
@@ -28,8 +36,16 @@ export type ProviderName =
   | "mock"
   | "llama-cpp";
 
+/** A concrete provider, or `"auto"` to detect one. */
+export type ProviderSelector = ProviderName | "auto";
+
 export interface ProviderSpec {
-  provider: ProviderName;
+  /**
+   * Omitting this is identical to `"auto"`: the highest-priority provider this
+   * machine can actually use is detected, ending at the free local model.
+   * Resolving it needs `makeProviderAsync`/`resolveProviderIdentityAsync`.
+   */
+  provider?: ProviderSelector;
   /** null/undefined selects the per-provider default. */
   model?: string | null;
   /** Env var NAME holding the API key; null/undefined selects the default. */
@@ -77,7 +93,8 @@ const DEFAULT_API_KEY_ENV: Record<string, string> = {
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 export interface ProviderIdentity {
-  provider: string;
+  /** Always concrete — never `"auto"`, so it is safe as cache-key material. */
+  provider: ProviderName;
   model: string;
 }
 
@@ -93,6 +110,14 @@ export interface ProviderIdentity {
  * `resolveProviderIdentityAsync` for selectors.
  */
 export function resolveProviderIdentity(spec: ProviderSpec): ProviderIdentity {
+  if (spec.provider == null || spec.provider === "auto") {
+    throw new InferenceError(
+      `No provider specified. Detecting one probes the environment, the Claude ` +
+        `CLI and the local model runtime, which cannot be done synchronously — ` +
+        `use resolveProviderIdentityAsync/makeProviderAsync, or name a provider ` +
+        `(${Object.keys(DEFAULT_MODELS).join(", ")}).`,
+    );
+  }
   const model = spec.model ?? DEFAULT_MODELS[spec.provider] ?? "unknown";
   if (spec.provider === "llama-cpp" && isLlamaSelector(model)) {
     throw new InferenceError(
@@ -115,13 +140,33 @@ export function resolveProviderIdentity(spec: ProviderSpec): ProviderIdentity {
 export async function resolveProviderIdentityAsync(
   spec: ProviderSpec,
 ): Promise<ProviderIdentity> {
-  const model = spec.model ?? DEFAULT_MODELS[spec.provider] ?? "unknown";
-  if (spec.provider !== "llama-cpp" || !isLlamaSelector(model)) {
-    return resolveProviderIdentity(spec);
+  // Provider first, then the model logic for whichever provider won.
+  const provider =
+    spec.provider == null || spec.provider === "auto"
+      ? await detectProvider(spec)
+      : spec.provider;
+  const resolved: ProviderSpec = { ...spec, provider };
+
+  const model = spec.model ?? DEFAULT_MODELS[provider] ?? "unknown";
+  if (provider !== "llama-cpp" || !isLlamaSelector(model)) {
+    return resolveProviderIdentity(resolved);
   }
   const tier: LlamaTier =
     model === "auto" ? await probeTier(llamaRuntimeFor(spec)) : model;
-  return { provider: spec.provider, model: aliasForTier(tier) };
+  const alias = aliasForTier(tier);
+
+  // Warn BEFORE the download starts, not after a CI job has stalled on it.
+  const entry = LLAMA_MODELS[alias];
+  if (
+    entry &&
+    !isModelDownloaded(
+      alias,
+      spec.llamaCpp?.modelsDirectory ?? defaultLlamaModelsDirectory(),
+    )
+  ) {
+    warnPendingDownload(alias, entry.sizeBytes);
+  }
+  return { provider, model: alias };
 }
 
 /**
@@ -191,6 +236,8 @@ export function makeProvider(spec: ProviderSpec): InferenceProvider {
 export async function makeProviderAsync(
   spec: ProviderSpec,
 ): Promise<InferenceProvider> {
-  const { model } = await resolveProviderIdentityAsync(spec);
-  return makeProvider({ ...spec, model });
+  // Both halves must be threaded through: passing only the model would leave a
+  // detected provider as `undefined` and throw in `makeProvider`.
+  const { provider, model } = await resolveProviderIdentityAsync(spec);
+  return makeProvider({ ...spec, provider, model });
 }
