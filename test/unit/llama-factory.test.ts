@@ -10,7 +10,7 @@
  * These assert contracts rather than values, so they stay honest on a runner
  * where the optional native binding is absent.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MODELS,
   InferenceError,
@@ -26,20 +26,21 @@ import {
 } from "../../src/index.js";
 import type { ProviderSpec } from "../../src/index.js";
 
-let llamaUsable = false;
-let realBudget = 0;
+/**
+ * Probed once at module scope so `it.skipIf` can use it at collection time.
+ * An early `return` inside a test reports as PASSED without asserting, which
+ * hides that the check never ran — see the real-machine rule in CLAUDE.md.
+ */
+const realBudget = await defaultLlamaRuntime()
+  .getMemoryBudgetBytes()
+  .then(
+    (b) => b,
+    () => 0,
+  );
+const llamaUsable = realBudget > 0;
 
-beforeAll(async () => {
-  await defaultLlamaRuntime()
-    .getMemoryBudgetBytes()
-    .then(
-      (b) => {
-        llamaUsable = true;
-        realBudget = b;
-      },
-      () => undefined,
-    );
-});
+/** Runs only where the native binding works; reported as skipped elsewhere. */
+const itWithLlama = it.skipIf(!llamaUsable);
 
 describe("llama-cpp defaults", () => {
   it("defaults to the auto selector", () => {
@@ -54,29 +55,31 @@ describe("llama-cpp defaults", () => {
 });
 
 describe("the real memory probe", () => {
-  it("reports a usable budget on a machine with the binding", () => {
-    if (!llamaUsable) return;
+  itWithLlama("reports a usable budget on a machine with the binding", () => {
     expect(realBudget).toBeGreaterThan(0);
     expect(Number.isFinite(realBudget)).toBe(true);
   });
 
-  it("resolves that budget to a real catalog tier", () => {
-    if (!llamaUsable) return;
+  itWithLlama("resolves that budget to a real catalog tier", () => {
     const tier = tierForBudget(realBudget);
     expect(LLAMA_TIERS).toContain(tier);
     expect(LLAMA_MODELS[aliasForTier(tier)]).toBeDefined();
   });
 
-  it("reports unavailability as a rejection, never a hang or a crash", async () => {
-    // The contract the detection probe depends on: this either resolves with a
-    // number or rejects with an actionable error — it never throws synchronously.
+  it("settles either way — never hangs, never throws synchronously", async () => {
+    // The contract detection depends on, asserted on whichever branch this
+    // machine takes rather than silently passing on the other.
     const outcome = await defaultLlamaRuntime()
       .getMemoryBudgetBytes()
-      .then(() => "resolved" as const)
-      .catch((e: unknown) => e);
-    if (outcome === "resolved") return;
-    expect(outcome).toBeInstanceOf(InferenceError);
-    expect((outcome as Error).message).toMatch(/node-llama-cpp/);
+      .then((b) => ({ ok: true as const, b }))
+      .catch((e: unknown) => ({ ok: false as const, e }));
+    if (outcome.ok) {
+      expect(typeof outcome.b).toBe("number");
+      expect(outcome.b).toBeGreaterThan(0);
+    } else {
+      expect(outcome.e).toBeInstanceOf(InferenceError);
+      expect((outcome.e as Error).message).toMatch(/node-llama-cpp/);
+    }
   }, 30_000);
 });
 
@@ -110,8 +113,7 @@ describe("synchronous resolution refuses selectors", () => {
 });
 
 describe("asynchronous resolution", () => {
-  it("resolves auto to a concrete catalog alias on this machine", async () => {
-    if (!llamaUsable) return;
+  itWithLlama("resolves auto to a concrete catalog alias on this machine", async () => {
     const identity = await resolveProviderIdentityAsync({
       provider: "llama-cpp",
     });
@@ -152,8 +154,7 @@ describe("asynchronous resolution", () => {
 });
 
 describe("makeProviderAsync", () => {
-  it("builds a llama-cpp provider whose modelName matches the resolved identity", async () => {
-    if (!llamaUsable) return;
+  itWithLlama("builds a llama-cpp provider whose modelName matches the resolved identity", async () => {
     const spec: ProviderSpec = { provider: "llama-cpp" };
     const identity = await resolveProviderIdentityAsync(spec);
     const provider = await makeProviderAsync(spec);

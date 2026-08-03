@@ -77,10 +77,23 @@ export function cliFailing(code: number, stderr: string): FakeCli {
   );
 }
 
-/** Never exits, so the caller's timeout is the thing under test. */
+/**
+ * Hangs long enough for the caller's timeout to be the thing under test, then
+ * reaps itself.
+ *
+ * The self-destruct is load-bearing on Windows: this script runs under a `.cmd`
+ * shim, so killing the timed-out child kills `cmd.exe` and leaves this
+ * `node.exe` as an orphan with no parent to reap it. Without the bound, every
+ * run of a timeout test leaked an immortal process.
+ */
 export function cliHanging(): FakeCli {
-  return writeFakeCli(`setInterval(() => {}, 1000);`);
+  return writeFakeCli(
+    `setInterval(() => {}, 1000);\nsetTimeout(() => process.exit(0), ${ORPHAN_TTL_MS});`,
+  );
 }
+
+/** Long enough that no realistic test timeout races it; short enough to reap. */
+const ORPHAN_TTL_MS = 15_000;
 
 /** Emits a Claude-CLI-shaped `--output-format json` envelope around `result`. */
 export function cliReturningJson(result: string): FakeCli {
