@@ -33,11 +33,25 @@ import {
 } from "../support/fake-cli.js";
 
 /**
- * Is the optional native binding usable here? Answered by asking the real
- * runtime, so these tests assert the CONTRACT and stay honest on a machine
- * (or CI runner) where node-llama-cpp is absent.
+ * Is the optional native binding usable here? Answered once, at module scope,
+ * by asking the real runtime.
+ *
+ * Resolved before collection so `it.skipIf` can use it: a test that instead
+ * early-returns is reported as PASSED without having asserted anything, which
+ * is exactly the "green means verified" illusion the real-machine rule exists
+ * to prevent. Skipped is honest; silently passing is not.
  */
-let llamaUsable = false;
+const llamaUsable = await defaultLlamaRuntime()
+  .getMemoryBudgetBytes()
+  .then(
+    () => true,
+    () => false,
+  );
+
+/** Runs only where the native binding works; reported as skipped elsewhere. */
+const itWithLlama = it.skipIf(!llamaUsable);
+/** Runs only where it does NOT, which is the only place the aggregate error is reachable. */
+const itWithoutLlama = it.skipIf(llamaUsable);
 
 /** Base spec whose CLI is genuinely absent, so only real signals decide. */
 function spec(over: Partial<ProviderSpec> = {}): ProviderSpec {
@@ -47,15 +61,12 @@ function spec(over: Partial<ProviderSpec> = {}): ProviderSpec {
 const KEYS = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] as const;
 let saved: Record<string, string | undefined> = {};
 
-beforeEach(async () => {
+beforeEach(() => {
   saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
   for (const k of KEYS) delete process.env[k];
   resetProviderDetectionWarning();
   resetClaudeCliProbe();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
-  llamaUsable = await defaultLlamaRuntime()
-    .getMemoryBudgetBytes()
-    .then(() => true, () => false);
 });
 
 afterEach(() => {
@@ -99,6 +110,8 @@ describe("detection priority", () => {
 
   it("skips a CLI that is genuinely not installed", async () => {
     const picked = await detectProvider(spec()).catch(() => "none");
+    // Never the CLI — the executable genuinely does not exist. What it falls
+    // through to depends on whether this machine has the native binding.
     expect(picked).not.toBe("claude-cli");
     expect(picked).toBe(llamaUsable ? "llama-cpp" : "none");
   }, 30_000);
@@ -195,9 +208,7 @@ describe("the Claude CLI probe", () => {
 });
 
 describe("when nothing is available", () => {
-  it("names every provider and why each failed", async () => {
-    // Only reachable when the native binding is genuinely unusable here.
-    if (llamaUsable) return;
+  itWithoutLlama("names every provider and why each failed", async () => {
     const error = await detectProvider(spec()).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(InferenceError);
     const message = (error as Error).message;
@@ -284,10 +295,9 @@ describe("warnings", () => {
     expect(warnings()).toContain('provider "auto"');
   }, 30_000);
 
-  it("does not warn about a download while only resolving an identity", async () => {
+  itWithLlama("does not warn about a download while only resolving an identity", async () => {
     // Identity resolution is the fully-cached path — it constructs nothing and
     // downloads nothing, so announcing gigabytes there is simply false.
-    if (!llamaUsable) return;
     const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
     await resolveProviderIdentityAsync(
       spec({ llamaCpp: { modelsDirectory: empty } }),
@@ -295,16 +305,14 @@ describe("warnings", () => {
     expect(warnings()).not.toMatch(/download|fetch/i);
   }, 60_000);
 
-  it("warns with the real size when weights are absent at construction", async () => {
-    if (!llamaUsable) return;
+  itWithLlama("warns with the real size when weights are absent at construction", async () => {
     const empty = mkdtempSync(join(tmpdir(), "inference-detect-"));
     await makeProviderAsync(spec({ llamaCpp: { modelsDirectory: empty } }));
     expect(warnings()).toMatch(/download|fetch/i);
     expect(warnings()).toContain("GB");
   }, 60_000);
 
-  it("does not warn about a download when the weights are really on disk", async () => {
-    if (!llamaUsable) return;
+  itWithLlama("does not warn about a download when the weights are really on disk", async () => {
     const dir = mkdtempSync(join(tmpdir(), "inference-detect-"));
     // Resolve what this machine actually picks, then put that file there.
     const { model } = await resolveProviderIdentityAsync(
