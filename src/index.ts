@@ -24,11 +24,17 @@ export type {
 // Provider factory
 export {
   makeProvider,
+  makeProviderAsync,
   resolveProviderIdentity,
+  resolveProviderIdentityAsync,
   DEFAULT_MODELS,
   DEFAULT_OPENAI_BASE_URL,
 } from "./providers/index.js";
-export type { ProviderName, ProviderSpec } from "./providers/index.js";
+export type {
+  ProviderIdentity,
+  ProviderName,
+  ProviderSpec,
+} from "./providers/index.js";
 
 // Concrete providers, for consumers that construct them directly
 export { AnthropicProvider } from "./providers/anthropic.js";
@@ -43,6 +49,44 @@ export type { OpenAICompatProviderOptions } from "./providers/openai-compat.js";
 export { ClaudeCliProvider } from "./providers/claude-cli.js";
 export { MockProvider, mockVerdict } from "./providers/mock.js";
 export type { MockResponse } from "./providers/mock.js";
+
+// Local models (llama.cpp). `node-llama-cpp` is an optional peer dependency —
+// importing these names does not load it; constructing a provider does.
+export {
+  LLAMA_MODELS,
+  LLAMA_SELECTORS,
+  LLAMA_TIERS,
+  aliasForTier,
+  defaultLlamaModelsDirectory,
+  isLlamaSelector,
+  resolveLlamaModelRef,
+  tierForBudget,
+  uriForTier,
+} from "./providers/llama-models.js";
+export type {
+  LlamaModelEntry,
+  LlamaSelector,
+  LlamaTier,
+} from "./providers/llama-models.js";
+export {
+  LlamaCppProvider,
+  defaultLlamaRuntime,
+  disposeLlamaModels,
+} from "./providers/llama-cpp.js";
+export type {
+  LlamaCppProviderOptions,
+  LlamaLoadedModel,
+  LlamaPromptOptions,
+  LlamaPromptResult,
+  LlamaRuntime,
+  LlamaSession,
+} from "./providers/llama-cpp.js";
+export { clearLlamaModels } from "./providers/llama-clean.js";
+export type {
+  ClearLlamaModelsOptions,
+  ClearLlamaModelsResult,
+  ClearedModelFile,
+} from "./providers/llama-clean.js";
 
 // Process seam
 export { realExec } from "./exec.js";

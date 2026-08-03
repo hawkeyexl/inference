@@ -20,7 +20,15 @@ jobs:
       # omits the Linux-side optional deps of @napi-rs/wasm-runtime
       # (@emnapi/core, @emnapi/runtime), which rolldown's wasm binding pulls
       # in — a strict lock check can't be satisfied on both platforms.
+      # node-llama-cpp is a devDependency purely so `typecheck` validates the
+      # llama-cpp adapter against the real upstream types. Nothing in CI runs
+      # local inference — every test drives an injected LlamaRuntime — so skip
+      # its postinstall rather than pull a native binary and risk a CMake
+      # fallback build on a machine that will never use it.
       - run: npm install
+        env:
+          NODE_LLAMA_CPP_SKIP_DOWNLOAD: "true"
+          NODE_LLAMA_CPP_POSTINSTALL: skip
       - run: npm run typecheck
       - run: npm run build
       - run: npm test

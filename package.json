@@ -1,7 +1,7 @@
 {
   "name": "@hawkeyexl/inference",
   "version": "0.1.0",
-  "description": "Shared TypeScript LLM inference layer: schema-constrained completion across Anthropic, OpenAI-compatible, and Claude CLI providers, with caching, cost accounting, and an LLM-as-judge ensemble.",
+  "description": "Shared TypeScript LLM inference layer: schema-constrained completion across Anthropic, OpenAI-compatible, Claude CLI, and in-process local llama.cpp providers, with caching, cost accounting, and an LLM-as-judge ensemble.",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -50,13 +50,24 @@
     "structured-output",
     "json-schema",
     "llm-as-judge",
-    "evals"
+    "evals",
+    "llama-cpp",
+    "local-llm",
+    "gguf"
   ],
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",
     "ajv": "^8.17.1",
     "cross-spawn": "^7.0.6"
+  },
+  "peerDependencies": {
+    "node-llama-cpp": "^3.19.0"
+  },
+  "peerDependenciesMeta": {
+    "node-llama-cpp": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.1",
@@ -70,6 +81,7 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^26.0.1",
     "husky": "^9.1.7",
+    "node-llama-cpp": "^3.19.1",
     "semantic-release": "^25.0.8",
     "tsup": "^8.3.5",
     "typescript": "^6.0.3",
