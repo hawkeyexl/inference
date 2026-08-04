@@ -15,16 +15,16 @@ success_criteria: >
 steps:
   - stage: Know what is a file format
     doc: /keep-it-working/upgrading/
-    exists: partial
-    note: "[GAP] JudgeRun is persisted to consumers' on-disk caches. Renaming or removing a field invalidates every cached ensemble in every consuming repo. It is treated as a file format, and such changes carry a BREAKING CHANGE footer."
+    exists: true
+    note: JudgeRun is persisted to consumers' on-disk caches. Renaming or removing a field invalidates every cached ensemble in every consuming repo. It is treated as a file format, and such changes carry a BREAKING CHANGE footer.
   - stage: Know what invalidates a key
     doc: /keep-it-working/upgrading/
-    exists: partial
-    note: "[GAP] The consumer composes the key, so the library cannot invalidate it. But provider id, model name, and the consumer's own prompt version are usually in it — and a resolved local selector changes the model name."
+    exists: true
+    note: The consumer composes the key, so the library cannot invalidate it. But provider id, model name, and the consumer's own prompt version are usually in it — and a resolved local selector changes the model name.
   - stage: Read the release channels
     doc: /keep-it-working/upgrading/
-    exists: partial
-    note: "[GAP] semantic-release with conventional commits. main, next as a prerelease channel, and feat/** branches each getting their own npm dist-tag."
+    exists: true
+    note: semantic-release with conventional commits. main, next as a prerelease channel, and feat/** branches each getting their own npm dist-tag.
   - stage: Check the cache file format
     doc: /reference/cache/
     exists: true
@@ -44,8 +44,6 @@ that no longer mean what they meant.
 
 Scoped to upgrade risk for consumers. Composing a key in the first place is
 [`cuj-cache-repeat-runs`](cuj-cache-repeat-runs.md).
-
-**Phase 2.** The stub page ships at launch carrying this CUJ; the walkthrough follows.
 
 ## The fact that makes this a journey
 

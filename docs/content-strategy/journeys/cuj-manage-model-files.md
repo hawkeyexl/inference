@@ -13,32 +13,32 @@ success_criteria: >
 steps:
   - stage: Find where weights live
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] ~/.hawkeyexl-inference/models, this library's own directory — not node-llama-cpp's shared ~/.node-llama-cpp/models. Per-user, so one copy serves every consuming project on the machine."
+    exists: true
+    note: ~/.hawkeyexl-inference/models, this library's own directory — not node-llama-cpp's shared ~/.node-llama-cpp/models. Per-user, so one copy serves every consuming project on the machine.
   - stage: Understand why the directory is owned
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] The shared default is used by node-llama-cpp's CLI and anything else on the machine. Owning a directory removes the hazard rather than defending against it. ADR 01003 records the near-miss that motivated it."
+    exists: true
+    note: The shared default is used by node-llama-cpp's CLI and anything else on the machine. Owning a directory removes the hazard rather than defending against it. ADR 01003 records the near-miss that motivated it.
   - stage: Relocate the directory
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] INFERENCE_MODELS_DIR for the whole process, or llamaCpp.modelsDirectory per provider. defaultLlamaModelsDirectory() reports the effective value."
+    exists: true
+    note: INFERENCE_MODELS_DIR for the whole process, or llamaCpp.modelsDirectory per provider. defaultLlamaModelsDirectory() reports the effective value.
   - stage: Preview a deletion
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] clearLlamaModels({ dryRun: true }) reports files and freedBytes without deleting. Show this before the destructive form."
+    exists: true
+    note: clearLlamaModels({ dryRun: true }) reports files and freedBytes without deleting. Show this before the destructive form.
   - stage: Clear selectively or entirely
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] By alias, by URI, by URI with a branch fragment, or everything. Split models remove every part; interrupted .ipull partials are removed too."
+    exists: true
+    note: By alias, by URI, by URI with a branch fragment, or everything. Split models remove every part; interrupted .ipull partials are removed too.
   - stage: Trust the safety guarantees
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] Only .gguf and .gguf.ipull are ever touched, top level only, never recursing. Loaded weights are disposed first, since a memory-mapped model cannot be deleted on Windows. A file held open is skipped, not forced."
+    exists: true
+    note: Only .gguf and .gguf.ipull are ever touched, top level only, never recursing. Loaded weights are disposed first, since a memory-mapped model cannot be deleted on Windows. A file held open is skipped, not forced.
   - stage: Free memory in a long-lived process
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] disposeLlamaModels(). Weights load once per process and are shared across providers naming the same model."
+    exists: true
+    note: disposeLlamaModels(). Weights load once per process and are shared across providers naming the same model.
   - stage: Look up the signatures
     doc: /reference/local-models/
     exists: true
@@ -50,8 +50,6 @@ something else's.
 
 Scoped to disk and process lifecycle. Choosing what to download is
 [`cuj-choose-a-local-model`](cuj-choose-a-local-model.md).
-
-**Phase 2.** The stub page ships at launch carrying this CUJ; the walkthrough follows.
 
 ## The page is asking for trust
 

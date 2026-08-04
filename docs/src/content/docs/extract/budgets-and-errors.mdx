@@ -3,73 +3,119 @@ title: Budgets and errors
 description: Keep an optional feature inside a cost ceiling, and make every failure land as a warning rather than a stack trace.
 sidebar:
   order: 2
-  badge:
-    text: Planned
-    variant: caution
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Code } from '@astrojs/starlight/components';
+import budgetAndDegrade from '@examples/budget-and-degrade.mjs?raw';
 
-Gating on cost and degrading gracefully inside a host CLI.
+Bounding what an optional feature can spend, and making sure nothing it does can take
+down the deterministic tool it lives inside.
 
-<Aside type="caution" title="This page is planned">
-  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
-</Aside>
+The pricing rules themselves are [cost and budgets](/inference/judge/cost-and-budgets/); this page
+is about wiring them into a CLI that has to keep working.
 
 ## Two failure classes
 
-| Class | How it arrives | Examples | Handling |
+The distinction everything here rests on, and the one most often collapsed:
+
+| Class | How it arrives | Examples | Correct handling |
 |---|---|---|---|
-| **Operational** | thrown as `InferenceError` | missing API key, unknown provider, unresolved selector | Catch at the boundary, translate, exit with your config-error code |
-| **Model** | returned on `run.error` | validation failed after both attempts, provider error, timeout | Never thrown. Record, skip the subject, continue |
+| **Operational** | thrown as `InferenceError` | missing API key, unknown provider name, unresolved selector | Catch at the boundary, translate, exit with your config-error code |
+| **Model** | returned on `run.error` | validation failed after both attempts, provider API error, timeout | Never thrown. Record it, skip the subject, carry on |
 
-Collapsing them turns a fixable configuration mistake into an unhandled stack trace.
+Collapse them and a fixable configuration mistake becomes an unhandled stack trace with the wrong
+exit code.
 
-## Translate `InferenceError`
+## Do it
 
-Every consumer of this package wraps it:
+<Code code={budgetAndDegrade} lang="js" title="examples/budget-and-degrade.mjs" />
+
+```text
+translated: true
+message: config: Anthropic provider needs EXAMPLE_KEY_T
+errors.md: skipped — Response failed schema validation:  mu
+budget reached at $0.009000 — skipping retries.md
+filled: 3 skipped: 2
+spent usd: 0.009000 ceiling usd: 0.009000
+calls actually made: 5
+calls charged to the total: 3
+```
+
+## Translate `InferenceError` at the boundary
 
 ```ts
-import { InferenceError, makeProvider } from "@hawkeyexl/inference";
-
-try {
-  return makeProvider(spec);
-} catch (error) {
-  if (error instanceof InferenceError) throw new MyToolError(error.message);
-  throw error;
+function buildProvider(spec) {
+  try {
+    return makeProvider(spec);
+  } catch (error) {
+    if (error instanceof InferenceError) throw new MyToolError(`config: ${error.message}`);
+    throw error;
+  }
 }
 ```
 
-Without this, your `fail()` handler does not recognise the error type and your exit-code contract
-breaks.
+Your `fail()` handler maps *your* error type to an exit code. A foreign type escapes it and becomes
+a crash. Every existing consumer of this package wrote this same six-line boundary — do not
+rediscover it.
 
-## Gate before spending
+Keep the rethrow for anything that is not an `InferenceError`. Swallowing unknown errors is how a
+real bug becomes a silent no-op.
+
+## Gate before the call, not after
 
 ```ts
-let spent = 0;
-const pricing = pricingFor(model, config.pricing);
-
-for (const doc of documents) {
-  if (pricing !== undefined && spent >= config.maxCostUsd) break;
-  const run = await completeValidatedJSON({ /* ... */ });
-  spent += costOfUsage(run.usage, pricing);
-}
+if (pricing !== undefined && spent >= config.maxCostUsd) break;
 ```
 
-The `pricing !== undefined` guard matters: an unpriced model makes the gate
-[inert](/inference/judge/cost-and-budgets/#the-trap), not satisfied.
+Checking afterwards means the overspend has already happened.
 
-<Aside type="caution" title="The ceiling is soft">
-  `InferenceRun` carries only the successful attempt's usage, so a retried request under-reports.
-  Leave headroom.
+<Aside type="danger" title="The pricing guard is not optional">
+  Without `pricing !== undefined`, an unpriced model makes `spent` permanently `0` and the loop
+  becomes unbounded. The gate is not satisfied — it is
+  [inert](/inference/judge/cost-and-budgets/#the-trap).
 </Aside>
+
+## Your ceiling is soft, in two ways
+
+The last two lines of the sample output are the point: **five calls were made, three were charged.**
+
+1. **Gating before each call bounds the overshoot to one call.** It does not prevent one — the call
+   that crosses the line has already been paid for.
+2. **A retried request reports only the successful attempt's usage.** The two rejected attempts on
+   `errors.md` cost real input tokens that never reached the total.
+
+Leave headroom. Treat the number as a bound with slack, not a measurement.
 
 ## Degrade, do not fail
 
-A missing key, a read-only cache, or a blown budget should warn and skip the optional feature. The
-deterministic path must be untouched.
+```ts
+if (run.error !== undefined) {
+  warn(`${doc.path}: skipped — ${run.error}`);
+  continue;            // the deterministic path is untouched
+}
+```
 
-## Meanwhile
+Three situations must all end in a warning and a clean exit, never a stack trace:
 
-- [Cost and budgets](/inference/judge/cost-and-budgets/) — the pricing rules in full
-- [Cost reference](/inference/reference/cost/) — signatures and the price table
+| Situation | What happens | Why it is safe |
+|---|---|---|
+| No API key | `InferenceError` at construction | Translated, reported as configuration |
+| Read-only cache directory | Warns once, run continues | The cache is an optimization, never a dependency |
+| Budget exhausted | Loop breaks, remaining subjects skipped | Reported in the summary, exit code unchanged |
+| Model returns nothing usable | `run.error` set, subject skipped | Never coerced into your output |
+
+That last row is the invariant the whole layer is built on: **an errored run is recorded, never
+dropped and never coerced.**
+
+## Next
+
+- [Cost and budgets](/inference/judge/cost-and-budgets/) — pricing resolution and the price table
+- [Cost reference](/inference/reference/cost/) — signatures
+- [Errors and type index](/inference/reference/errors-and-types/) — everything `InferenceError` covers
+
+{/* test {"testId":"budgets-and-errors","description":"Error translation, gating before the call, and the two ways the ceiling is soft."} */}
+{/* step {"description":"An operational failure is translated into the host CLI's own error type.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/budget-and-degrade.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"translated: true"}} */}
+{/* step {"description":"A model failure is recorded and the document skipped, leaving the run alive.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/budget-and-degrade.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"errors.md: skipped"}} */}
+{/* step {"description":"The budget gate stops further work once the ceiling is reached.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/budget-and-degrade.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"budget reached at $0.009000"}} */}
+{/* step {"description":"A retried request under-reports: five calls made, three charged.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/budget-and-degrade.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"calls actually made: 5"}} */}
+{/* test end */}

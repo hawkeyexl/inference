@@ -116,12 +116,13 @@ Everything exports from the package root, but the two layers are independent.
 
 Point the same call at a real model: [choose a provider](/inference/get-started/choose-a-provider/).
 
-{/* Doc Detective inline tests. Each step runs a real file from examples/ and asserts on its
-    stdout; a mismatch exits nonzero and fails the step. Assertions ride on the exit code
-    because runCode does not forward `stdio` to its shell step — see adrs/01005.
-    Run from the repo root with `npm run build` done first: `npx doc-detective`. */}
+{/* Doc Detective inline tests. Each step is a one-line launcher that runs a real file from
+    examples/; the step's `stdio` field carries the assertion. A sample cannot be inlined —
+    runCode writes the snippet to os.tmpdir(), so a bare specifier cannot resolve from there.
+    See adrs/01005. Run from the repo root, after `npm run build`: `npx doc-detective`. */}
 {/* test {"testId":"get-started","description":"The install-and-first-call flow, run against the built package via examples/first-call.mjs."} */}
 {/* step {"description":"Node 24+ prerequisite is stated on the page and satisfied by the runner.","runCode":{"language":"javascript","code":"const a=require('node:assert');a.ok(Number(process.versions.node.split('.')[0])>=24,'Node 24+ required, got '+process.versions.node);"}} */}
-{/* step {"description":"The first call returns a validated result matching the output shown on the page.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes(\"result: { summary: 'Covers authentication and token refresh.' }\"),o);"}} */}
-{/* step {"description":"A schema-invalid response is recorded as an error rather than thrown or coerced.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('failed.result: undefined'),o);a.ok(o.includes('failed.error: Response failed schema validation'),o);"}} */}
+{/* step {"description":"The first call returns a validated result matching the output shown on the page.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"result: { summary: 'Covers authentication and token refresh.' }"}} */}
+{/* step {"description":"A schema-invalid response is recorded as an error rather than thrown or coerced (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"failed.result: undefined"}} */}
+{/* step {"description":"A schema-invalid response is recorded as an error rather than thrown or coerced (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"failed.error: Response failed schema validation"}} */}
 {/* test end */}

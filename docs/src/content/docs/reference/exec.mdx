@@ -3,53 +3,87 @@ title: Exec reference
 description: realExec, ExecFn, ExecOptions, and ExecResult.
 sidebar:
   order: 7
-  badge:
-    text: Planned
-    variant: caution
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The cross-platform subprocess helper.
+The cross-platform subprocess helper, and the seam that makes it fakeable.
 
-<Aside type="caution" title="This page is planned">
-  Prose and examples are thin. The signatures below are complete and accurate.
-</Aside>
+For using it, see [the subprocess seam](/inference/extract/subprocess-seam/).
 
-## Types
+## `realExec`
+
+```ts
+const realExec: ExecFn;
+```
+
+Runs a command and resolves with its result. **Never rejects** for a process-level failure — a
+command that cannot start, times out, or exits nonzero all resolve with the relevant field set.
+
+## `ExecFn`
 
 ```ts
 type ExecFn = (cmd: string[], opts?: ExecOptions) => Promise<ExecResult>;
+```
 
+The injection seam. `realExec` satisfies it, and so does any fake you write. Accept one in your own
+functions and default it to `realExec`.
+
+## `ExecOptions`
+
+```ts
 interface ExecOptions {
   cwd?: string;
   timeoutMs?: number;
-  env?: Record<string, string | undefined>;  // undefined UNSETS an inherited var
-  input?: string;                            // piped to stdin, then closed
+  env?: Record<string, string | undefined>;
+  input?: string;
 }
+```
 
+| Option | Default | Notes |
+|---|---|---|
+| `cwd` | the current process's | |
+| `timeoutMs` | `60000` | On expiry the promise settles with `timedOut: true` |
+| `env` | inherited | Keys you omit are inherited. **A value of `undefined` unsets the variable** rather than setting it empty |
+| `input` | none | Piped to stdin, then the stream is closed. `EPIPE` is swallowed |
+
+<Aside type="caution" title="undefined unsets; empty string does not">
+  `{ GIT_DIR: undefined }` removes `GIT_DIR` from the child's environment. `{ GIT_DIR: "" }` leaves
+  it present and empty, which `git` treats as a real — and broken — value. This distinction is the
+  one upstream type fix the library's extraction required.
+</Aside>
+
+## `ExecResult`
+
+```ts
 interface ExecResult {
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
-  spawnError?: string;   // present when the process could not start
+  spawnError?: string;
 }
-
-const realExec: ExecFn;
 ```
+
+| Field | Meaning |
+|---|---|
+| `code` | Exit code, or `null` if the process was terminated by a signal |
+| `stdout` / `stderr` | Captured output, UTF-8 decoded |
+| `timedOut` | `true` when `timeoutMs` elapsed |
+| `spawnError` | Present when the process could not start at all — the command was not found, or was not executable |
+
+Check `spawnError` first, then `timedOut`, then `code`.
 
 ## Behavior
 
-- **argv array, no shell.** `shell: true` is never set. npm shims still resolve on Windows.
-- **`env: { FOO: undefined }` unsets `FOO`** rather than setting it to `""`. Empty string and absent
-  are different things to many programs, `git` among them.
-- **`input` is piped and the stream closed.** `EPIPE` is swallowed.
-- **Both pipes use `setEncoding("utf8")`**, so multi-byte characters split across chunk boundaries
-  decode correctly.
-- **The timeout settles on the timer itself**, not on `close`, so a child that ignores SIGTERM
-  cannot hang the caller.
-- **It returns rather than throws.** A spawn failure is `spawnError`; a timeout is `timedOut`.
+- **argv array, no shell.** `shell: true` is never set, so there are no quoting hazards and no
+  injection surface. Shell syntax such as `|` or `>` is not interpreted. npm shims still resolve on
+  Windows.
+- **UTF-8 across chunk boundaries.** Both pipes use `setEncoding("utf8")`, so a multi-byte character
+  split across two reads decodes correctly rather than becoming replacement characters.
+- **The timeout settles on the timer itself**, not on the child's `close` event. A POSIX child that
+  ignores SIGTERM cannot hang the caller.
+- **stdin is closed after `input` is written**, so a child waiting on end-of-input proceeds.
 
 ## Two different default timeouts
 
@@ -58,10 +92,11 @@ const realExec: ExecFn;
 | `realExec` (`opts.timeoutMs`) | 60000 ms |
 | `ClaudeCliProvider` constructor | 180000 ms |
 
-The provider passes its own value through, so the 60 s default applies only when you call
-`realExec` yourself.
+The provider passes its own value through to `realExec`, so the 60-second default applies only when
+you call `realExec` directly.
 
 ## Source of truth
 
 `src/exec.ts` and `src/providers/types.ts`. Behavior is pinned in `test/unit/exec.test.ts`,
-including a 50,000-character multi-byte stdin round-trip and a SIGTERM-ignoring child.
+including a 50,000-character multi-byte stdin round-trip, an unset-via-`undefined` case, and a
+SIGTERM-ignoring child.

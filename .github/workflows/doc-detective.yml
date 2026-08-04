@@ -1,17 +1,19 @@
 # Execute the code samples shown in the documentation.
 #
 # Pages under docs/src/content/docs/** carry inline Doc Detective tests. Each `runCode`
-# step launches a real file from examples/ and asserts on its stdout; a mismatch exits
-# nonzero and fails the step. Assertions ride on the exit code deliberately — runCode
-# does not forward `stdio` to its shell step, so an `stdio` assertion would silently
-# never run. See adrs/01005.
+# step is a one-line launcher that runs a real file from examples/, and the step's own
+# `stdio` field carries the assertion. See adrs/01005.
+#
+# A sample cannot be inlined into the step: runCode writes the snippet to os.tmpdir(),
+# so module resolution happens from there and a bare specifier cannot resolve — by
+# `import` (ERR_MODULE_NOT_FOUND) or by `require` (MODULE_NOT_FOUND).
 #
 # `npm run build` must precede the run: examples/*.mjs import the package by its real
 # published name via Node's package self-reference, which resolves to dist/index.js.
 #
-# Doc Detective is invoked from the repository root because runCode does not forward
-# `workingDirectory` either — the launchers' relative paths resolve against the cwd
-# of this process.
+# Doc Detective is invoked from the repository root and `workingDirectory` is left
+# unset — a relative value fails on Windows with ENOENT, so the launchers' paths
+# resolve against this process's cwd instead.
 #
 # Fork pull requests are refused: these steps execute code from the diff.
 

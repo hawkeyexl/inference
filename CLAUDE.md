@@ -63,9 +63,10 @@ CUJ codes are `R1`–`R2`, `P1`–`P4`, `M1`–`M3`, `O1`–`O3`, `X1`, `U1`; `P
 3. Put signatures and option tables in `reference/`; journey pages link into them.
 4. Every page needs `title` and `description` frontmatter.
 5. Every runnable sample is a file in `examples/`, rendered via a `?raw` import and executed in CI
-   by Doc Detective. Adding one means adding a `runCode` step — see
-   [ADR 01005](adrs/01005-docset-strategy-and-executable-examples.md) for why assertions ride on
-   the exit code.
+   by Doc Detective. Adding one means adding a `runCode` step whose `code` launches the file and
+   whose `stdio` carries one assertion — see
+   [ADR 01005](adrs/01005-docset-strategy-and-executable-examples.md) for why a sample cannot be
+   inlined into the step.
 6. Adding a page means recording it in `information_architecture/proposed-ia.md` in the same change.
 
 ## Invariants of this codebase (required reading)
@@ -132,11 +133,13 @@ cd docs && npm install && npm run build && cd .. && node scripts/check-docs-link
 
 `npm run build` at the root must come first — `examples/*.mjs` import the package by its published
 name via Node's package self-reference, which resolves to `dist/`. Run `doc-detective` from the
-repository root; its `runCode` launchers use paths relative to the working directory.
+repository root: its `runCode` launchers use paths relative to the working directory, and
+`workingDirectory` is deliberately left unset because a relative value fails on Windows.
 
-On Windows, `doc-detective` may exit non-zero with `EPERM ... Temp\doc-detective\browsers` **after**
-printing `RESULTS`. That is its own post-run temp cleanup failing, not a failing test — read the
-`"summary"` block in the output rather than the exit code. CI runs on Linux and is unaffected.
+**Use a current `doc-detective`.** `npx doc-detective` resolves the latest release; do not run a
+vendored copy found elsewhere on the machine. An early `4.x` beta silently dropped `stdio` from
+`runCode` steps, which makes every assertion here pass unconditionally — a false green that looks
+exactly like a healthy run. ADR 01005 records the episode.
 
 ## Real-machine verification (required)
 

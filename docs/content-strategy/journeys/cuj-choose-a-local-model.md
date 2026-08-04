@@ -41,8 +41,8 @@ steps:
     note: Thinking is disabled by default because a grammar constrains generation from token zero and cuts a reasoning model off mid-thought. thoughtTokens is the budget.
   - stage: Manage what you downloaded
     doc: /local/managing-model-files/
-    exists: partial
-    note: "[GAP] Hands off to O3. Stub exists; the walkthrough is Phase 2."
+    exists: true
+    note: Hands off to O3.
   - stage: Look up the catalog
     doc: /reference/local-models/
     exists: true

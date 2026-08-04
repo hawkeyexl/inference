@@ -14,24 +14,24 @@ success_criteria: >
 steps:
   - stage: Accumulate cost per call
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] costOfUsage per run against a running total, checked before the next call."
+    exists: true
+    note: costOfUsage per run against a running total, checked before the next call.
   - stage: Know the ceiling is soft
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] A retried request under-reports: only the successful attempt's usage is carried. State the size of the gap."
+    exists: true
+    note: A retried request under-reports: only the successful attempt's usage is carried. State the size of the gap.
   - stage: Translate InferenceError
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] Catch InferenceError at the boundary and re-wrap into the host's own error class, or exit-code mapping breaks and a config problem becomes an unhandled stack trace. All three consumers do this."
+    exists: true
+    note: Catch InferenceError at the boundary and re-wrap into the host's own error class, or exit-code mapping breaks and a config problem becomes an unhandled stack trace. All three consumers do this.
   - stage: Distinguish operational from model failure
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] InferenceError is thrown for operational problems — missing key, unknown provider. A model failure is never thrown; it arrives as run.error. Different handling, different exit codes."
+    exists: true
+    note: InferenceError is thrown for operational problems — missing key, unknown provider. A model failure is never thrown; it arrives as run.error. Different handling, different exit codes.
   - stage: Degrade rather than fail
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] Warn and skip the optional feature. A read-only cache, a blown budget, or an absent key must leave the deterministic path untouched."
+    exists: true
+    note: Warn and skip the optional feature. A read-only cache, a blown budget, or an absent key must leave the deterministic path untouched.
   - stage: Cross-check the pricing rules
     doc: /judge/cost-and-budgets/
     exists: true
@@ -48,8 +48,6 @@ and a correct exit code rather than a stack trace.
 Scoped to gating and degradation for the completion layer. The pricing rules themselves are
 [`cuj-budget-judge-spend`](cuj-budget-judge-spend.md), which this journey links to rather than
 repeats.
-
-**Phase 2.** The stub page ships at launch carrying this CUJ; the walkthrough follows.
 
 ## Two failure classes, handled differently
 

@@ -14,24 +14,24 @@ success_criteria: >
 steps:
   - stage: Learn that the seam exists
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] EnsembleOptions.schema is the override. It appears in ADR 01001 and in the type, and nowhere in the current README. Both existing judge consumers depend on it."
+    exists: true
+    note: EnsembleOptions.schema is the override. It appears in ADR 01001 and in the type, and nowhere in the current README. Both existing judge consumers depend on it.
   - stage: Understand why descriptions matter
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] Field descriptions are prompt surface that measurably steers the model. docevals' and agentevals' schemas differ from the built-in one only in $id, title, and descriptions."
+    exists: true
+    note: Field descriptions are prompt surface that measurably steers the model. docevals' and agentevals' schemas differ from the built-in one only in $id, title, and descriptions.
   - stage: Start from the canonical schema
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] VERDICT_SCHEMA is exported. Five required fields, additionalProperties false, confidence bounded 0 to 1."
+    exists: true
+    note: VERDICT_SCHEMA is exported. Five required fields, additionalProperties false, confidence bounded 0 to 1.
   - stage: Pass the override
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] EnsembleOptions.schema on runEnsemble and judge. The validator is compiled once for the whole ensemble."
+    exists: true
+    note: EnsembleOptions.schema on runEnsemble and judge. The validator is compiled once for the whole ensemble.
   - stage: Keep it JudgeVerdict-shaped
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] The known hole: an override that does not produce JudgeVerdict-shaped objects fails at runtime, not at compile time. State it, and give the check."
+    exists: true
+    note: The known hole: an override that does not produce JudgeVerdict-shaped objects fails at runtime, not at compile time. State it, and give the check.
   - stage: Mind the local-model caveats
     doc: /local/choosing-a-model/
     exists: true
@@ -47,8 +47,6 @@ the shape the consensus math depends on.
 
 Scoped to the schema override. Running the ensemble is
 [`cuj-judge-ensemble`](cuj-judge-ensemble.md).
-
-**Phase 2.** The stub page ships at launch carrying this CUJ; the walkthrough follows.
 
 ## Why this journey exists at all
 

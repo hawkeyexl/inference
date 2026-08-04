@@ -3,45 +3,49 @@ title: The subprocess seam
 description: realExec is a general-purpose cross-platform subprocess helper, usable for commands that have nothing to do with inference.
 sidebar:
   order: 3
-  badge:
-    text: Planned
-    variant: caution
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Code } from '@astrojs/starlight/components';
+import execSeam from '@examples/exec-seam.mjs?raw';
 
-Using this package's subprocess helper for your own commands.
+Using this package's subprocess helper for your own commands, and injecting a fake so unit
+tests never spawn anything.
 
-<Aside type="caution" title="This page is planned">
-  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
-</Aside>
+The only journey here that involves no model at all. Full signatures are in the
+[exec reference](/inference/reference/exec/).
 
-## It is public, and it is general
+## Why it is worth using
 
-`realExec` exists because the `claude-cli` provider needs a subprocess helper — but it is exported,
-tested, cross-platform, and has nothing provider-specific in it. If you already depend on this
-package, you can drive `git`, a linter, or anything else with it.
+`realExec` exists because the `claude-cli` provider needs a subprocess helper, and the one it needed
+turned out to be non-trivial. It is exported, tested, cross-platform, and already a dependency if
+you use this package at all.
 
-```ts
-import { realExec } from "@hawkeyexl/inference";
+Four behaviors were each earned by a real failure:
 
-const result = await realExec(["git", "log", "-1", "--format=%H"], { cwd: repoRoot });
-if (result.code === 0) console.log(result.stdout.trim());
+| Behavior | The failure it prevents |
+|---|---|
+| argv array, never a shell | quoting hazards and injection; npm shims still resolve on Windows |
+| `input` piped to stdin | user content exceeding the ~32K Windows command-line limit |
+| `env` values accept `undefined` to **unset** | empty string and absent are different things to `git` |
+| timeout settles on the timer, not on `close` | a child that ignores SIGTERM hanging the caller |
+
+Both pipes also use `setEncoding("utf8")`, so a multi-byte character split across chunk boundaries
+decodes correctly instead of becoming replacement characters.
+
+## Do it
+
+<Code code={execSeam} lang="js" title="examples/exec-seam.mjs" />
+
+```text
+exit code: 0
+looks like a version: true
+spawn failed without throwing: true
+nonzero exit reported: 3
+bytes received over stdin: 40000
+EXAMPLE_INHERITED=<unset>
+timed out cleanly: true
+ExecFn accepted as a provider seam: true
 ```
-
-## Four behaviors that were each earned
-
-- **argv array, never a shell.** No quoting hazards, no injection surface. npm shims still resolve
-  on Windows.
-- **stdin over argv.** `opts.input` is piped and the stream closed. The `claude-cli` provider relies
-  on this because user content routinely exceeds the ~32K Windows command-line limit.
-- **`env` values accept `undefined` to *unset*.** Not blank — unset. Empty string and absent are
-  different things to `git`.
-- **The timeout settles on the timer**, not on `close`, so a child that ignores SIGTERM cannot hang
-  the caller.
-
-Multi-byte UTF-8 split across chunk boundaries also decodes correctly — both pipes get
-`setEncoding("utf8")`.
 
 ## It returns, it does not throw
 
@@ -51,18 +55,80 @@ interface ExecResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
-  spawnError?: string;
+  spawnError?: string;   // present when the process could not start
 }
 ```
 
-A failure to spawn is `spawnError`, not an exception. Check the fields.
+Three failure modes, three fields — none of them exceptions:
+
+```ts
+const result = await realExec(["git", "log", "-1", "--format=%H"], { cwd: repoRoot });
+
+if (result.spawnError !== undefined) return warn(`git not found: ${result.spawnError}`);
+if (result.timedOut) return warn("git timed out");
+if (result.code !== 0) return warn(`git failed: ${result.stderr.trim()}`);
+
+use(result.stdout.trim());
+```
+
+<Aside type="caution" title="No shell means no shell syntax">
+  `realExec(["ls | grep foo"])` does not work — there is no shell to interpret the pipe. Pass a real
+  argv array, and do any piping in JavaScript. This is the point, not a limitation: it is why there
+  is no injection surface.
+</Aside>
+
+## Unsetting an inherited variable
+
+```ts
+await realExec(["git", "log"], { env: { GIT_DIR: undefined, GIT_WORK_TREE: undefined } });
+```
+
+`undefined` **removes** the variable from the child's environment. Setting it to `""` would leave it
+present but empty, which `git` treats as a real (and broken) value. This distinction is the one
+upstream type fix the library's extraction required, and it came from exactly this use case.
+
+Keys you do not mention are inherited unchanged.
+
+## Two default timeouts
+
+| Where | Default |
+|---|---|
+| `realExec` (`opts.timeoutMs`) | 60000 ms |
+| `ClaudeCliProvider` constructor | 180000 ms |
+
+The provider passes its own value through, so the 60-second default applies only when you call
+`realExec` yourself.
 
 ## Inject a fake in tests
 
-`ExecFn` is the seam. Pass one through `ProviderSpec.exec` for `claude-cli`, or into your own code,
-and never spawn in a unit test. See
+`ExecFn` is the seam — the same type `realExec` satisfies:
+
+```ts
+type ExecFn = (cmd: string[], opts?: ExecOptions) => Promise<ExecResult>;
+```
+
+Pass one through `ProviderSpec.exec` for `claude-cli`, or accept one in your own function and
+default it to `realExec`:
+
+```ts
+export async function currentCommit(repoRoot: string, exec: ExecFn = realExec) {
+  const result = await exec(["git", "log", "-1", "--format=%H"], { cwd: repoRoot });
+  return result.code === 0 ? result.stdout.trim() : undefined;
+}
+```
+
+Your unit test passes a fake and asserts on the argv without spawning anything. See
 [testing your integration](/inference/keep-it-working/testing/#execfn).
 
-## Meanwhile
+## Next
 
-- [Exec reference](/inference/reference/exec/) — full signatures
+- [Exec reference](/inference/reference/exec/) — full signatures and defaults
+- [Testing your integration](/inference/keep-it-working/testing/) — all three seams together
+
+{/* test {"testId":"exec-seam","description":"realExec as a general-purpose subprocess helper: argv, stdin, env unsetting, timeouts, and the ExecFn seam."} */}
+{/* step {"description":"A command runs and its exit code and stdout are returned rather than thrown.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/exec-seam.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"looks like a version: true"}} */}
+{/* step {"description":"A command that cannot start reports spawnError instead of throwing.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/exec-seam.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"spawn failed without throwing: true"}} */}
+{/* step {"description":"A 40,000-character payload reaches the child over stdin, well past the Windows argv limit.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/exec-seam.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"bytes received over stdin: 40000"}} */}
+{/* step {"description":"An env value of undefined unsets an inherited variable rather than blanking it.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/exec-seam.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"EXAMPLE_INHERITED=<unset>"}} */}
+{/* step {"description":"A child that ignores termination still settles the caller on the timer.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/exec-seam.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"timed out cleanly: true"}} */}
+{/* test end */}

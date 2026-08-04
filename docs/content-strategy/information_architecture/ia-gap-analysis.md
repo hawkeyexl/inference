@@ -36,7 +36,7 @@ Every section of the README has a destination. Nothing is discarded.
 | Auto-detection | `get-started/choose-a-provider.mdx` + `reference/providers.mdx` | Promoted to the top of the page — it is the zero-config path and the best answer for a reader with no credential |
 | Local models (all subsections) | `local/*.mdx` + `reference/local-models.mdx` | Split across three journey pages and one reference page |
 | Testing against this library | `keep-it-working/testing.mdx` | Expanded from `MockProvider` alone to all three seams |
-| **API (52 bare names)** | **all six Reference pages** | **Replaced with real signatures.** The single biggest change |
+| **API (52 bare names)** | **all nine Reference pages** | **Replaced with real signatures.** The single biggest change |
 | Design decisions (ADR links) | `index.mdx` footer + inline links | Linked from the pages whose reasoning they carry |
 | License | slimmed `README.md` | Unchanged |
 
@@ -118,7 +118,7 @@ The README names all 52 value exports (`resetTemperatureWarning` is the sole omi
 `JsonCache`'s constructor arity, what `EnsembleOptions` accepts, or what `InferenceRun`'s fields
 mean without opening `dist/index.d.ts` or the source.
 
-This is the largest gap by volume, and it is what the six launch Reference pages exist to close.
+This is the largest gap by volume, and it is what the nine Reference pages exist to close.
 
 ### 11. Auto-detection was added after this strategy was first drafted · R2
 
@@ -182,13 +182,16 @@ The last one is the most serious. It is stated in this repo's own `CLAUDE.md` an
 None. The IA was built CUJ-first, so no page exists without a journey to justify it. This section
 stays as a standing check: **if a future page cannot name its CUJ, it does not belong in the nav.**
 
-## Known limitations of this launch
+## Status
+
+All 24 pages are written and all 14 CUJs are walkable end to end. Every CUJ step is `exists: true`,
+and `scripts/check-strategy-anchors.mjs` fails the build if one of those routes stops resolving or
+starts pointing at a stub.
+
+## Known limitations
 
 Stated rather than hidden.
 
-- **Eight Phase 2 pages ship as stubs.** Each carries its CUJ in frontmatter and a one-line scope
-  statement, so no journey step points at a 404 — but five CUJs (P4, M2, M3, O3, U1) are not yet
-  walkable end to end. Their journey files mark every affected step `exists: partial`.
 - **Export coverage is a presence check only.** `scripts/check-docs-exports.mjs` fails CI when an
   export appears on no Reference page, but it cannot tell whether the signature documented there is
   correct. Comparing declared signatures against the `.d.ts` is a larger piece of work and is not

@@ -3,64 +3,133 @@ title: Upgrading
 description: What survives a version bump, what invalidates a cached ensemble, and how the release channels map to what you install.
 sidebar:
   order: 2
-  badge:
-    text: Planned
-    variant: caution
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Code } from '@astrojs/starlight/components';
+import cacheVersioning from '@examples/cache-versioning.mjs?raw';
 
-Upgrading without silently discarding — or silently misreading — a populated cache.
+Upgrading without silently discarding a populated cache — or, worse, replaying entries that no
+longer mean what they meant.
 
-<Aside type="caution" title="This page is planned">
-  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
+Composing a key in the first place is [caching](/inference/judge/caching/).
+
+## The fact that makes this a journey
+
+<Aside type="danger" title="JudgeRun is a file format">
+  It is persisted to your on-disk cache. Renaming or removing one of its fields invalidates **every
+  cached ensemble you hold**.
 </Aside>
 
-## `JudgeRun` is a file format
+Inside this repository `JudgeRun` is treated as a file format rather than an internal type, and a
+change to it carries a `BREAKING CHANGE:` footer so semantic-release majors correctly. So:
 
-<Aside type="danger">
-  `JudgeRun` is persisted to your on-disk cache. Renaming or removing one of its fields invalidates
-  **every cached ensemble you hold**.
-</Aside>
+> **A major version bump is your signal to assume the judge cache is stale until you have checked.**
 
-It is treated as a file format inside this repository, and such changes carry a `BREAKING CHANGE:`
-footer so semantic-release majors correctly. If a major version arrives, assume your judge cache is
-stale until you have checked.
+A minor or patch bump cannot change `JudgeRun`'s shape. That is the whole contract, and it is why
+the field names look more conservative than they otherwise would.
 
 ## What the library can and cannot invalidate
 
-**It cannot invalidate your cache.** You compose the key; the library only hashes the parts you hand
-it. There is no `PROMPT_VERSION` here and no library-owned invalidation signal, by design.
+An honest split, and the reason this page is short:
 
-**It can change what a key means.** If `JudgeRun` gains or loses a field, an entry written before
-the upgrade deserializes differently afterwards.
+| | Who controls it |
+|---|---|
+| **Cannot** invalidate your cache | You compose the key. The library only hashes the parts you hand it — no `PROMPT_VERSION` ships here and there is no library-owned invalidation signal. |
+| **Can** change what a key *means* | If `JudgeRun` gains or loses a field, an entry written before the upgrade deserializes differently afterwards. |
 
-So your protection is entirely your own, and it is two things you should already have from
-[caching](/inference/judge/caching/):
+So your protection is entirely your own, and it is two things.
 
-1. A version marker in the key — bump it when your prompt, your schema, or your expectations change.
-2. A recheck-on-read wrapper that rejects entries whose shape no longer matches.
+## Do it
+
+<Code code={cacheVersioning} lang="js" title="examples/cache-versioning.mjs" />
+
+```text
+same version replays: true
+bumped version misses: true
+raw cache would replay it: true
+guarded cache rejects it:  true
+```
+
+### 1. Put a version marker in the key
+
+```ts
+const cacheKey = buildCacheKey([
+  provider.provider(),
+  provider.modelName(),
+  `v${MY_PROMPT_VERSION}`,   // yours to bump
+  `r${runs}`,
+  sha256(pageBody),
+]);
+```
+
+Bump it when **your** prompt, your verdict schema, or your expectations change. The old entries are
+not deleted — they simply stop being found, which means a rollback still hits them.
+
+### 2. Re-validate on read
+
+The last two output lines are the point: the raw cache replays a stale entry happily, and a guarded
+one rejects it.
+
+```ts
+class VerdictCache extends JsonCache {
+  get(key) {
+    const entry = super.get(key);
+    if (!Array.isArray(entry)) return undefined;
+    const shapedCorrectly = entry.every(
+      (run) => run.error !== undefined || typeof run.verdict?.confidence === "number",
+    );
+    return shapedCorrectly ? entry : undefined;
+  }
+}
+```
+
+`JsonCache` deliberately does not know what shape you store, so it cannot do this for you. It
+already treats a corrupt or non-array entry as a miss; what it cannot detect is an entry that is
+**well-formed and obsolete**.
+
+Every existing consumer of this package wrote this wrapper independently. Write it once, up front,
+and an upgrade becomes a non-event.
 
 ## Release channels
 
 semantic-release with conventional commits:
 
-| Branch | Channel |
-|---|---|
-| `main` | stable — what a caret range resolves to |
-| `next` | prerelease |
-| `feat/**` | its own npm dist-tag, derived from the branch name |
+| Branch | Channel | Reaches a caret range? |
+|---|---|---|
+| `main` | stable | **yes** |
+| `next` | prerelease | no |
+| `feat/**` | its own npm dist-tag, derived from the branch name | no |
 
-A caret range gets `main` only. The per-branch dist-tags exist for testing an in-progress feature and
-will not reach you by accident.
+Per-branch dist-tags exist for trying an in-progress feature deliberately. They cannot reach you by
+accident.
+
+## What to check on a major bump
+
+<Aside type="tip" title="A three-minute checklist">
+  1. Read the changelog for `JudgeRun`, `InferenceRun`, or `ConsensusResult` field changes.
+  2. If any changed, bump your cache-key version marker.
+  3. Confirm your recheck-on-read wrapper still asserts the fields you rely on.
+  4. Re-run one subject and confirm `cached: false` on the first run, `true` on the second.
+</Aside>
 
 ## One local-model wrinkle
 
 A resolved selector changes the model name in your cache key. Weights cached under `auto` on one
-machine will not be hit on a machine with more memory — that is the async factory working as
-intended, not a cache bug.
+machine will not be hit on a machine with more memory — because the key names the *concrete* model
+that ran, not the selector.
 
-## Meanwhile
+That is the async factory working as designed, not a cache bug. It is what stops a 2.62 GB and a
+6.72 GB model from sharing results under one key.
 
-- [Caching](/inference/judge/caching/) — key composition and the recheck-on-read pattern
+## Next
+
+- [Caching](/inference/judge/caching/) — key composition in full
 - [Cache reference](/inference/reference/cache/) — the on-disk format
+- [Custom verdict schema](/inference/judge/verdict-schema/) — the other thing that should bump your marker
+
+{/* test {"testId":"upgrading","description":"Cache-key versioning and the recheck-on-read wrapper that makes an upgrade survivable."} */}
+{/* step {"description":"An unchanged key replays from cache.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cache-versioning.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"same version replays: true"}} */}
+{/* step {"description":"Bumping the version marker misses rather than serving a stale verdict.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cache-versioning.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"bumped version misses: true"}} */}
+{/* step {"description":"A raw JsonCache replays a well-formed but obsolete entry — the gap the wrapper closes.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cache-versioning.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"raw cache would replay it: true"}} */}
+{/* step {"description":"The recheck-on-read wrapper rejects the obsolete entry.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cache-versioning.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"guarded cache rejects it:  true"}} */}
+{/* test end */}

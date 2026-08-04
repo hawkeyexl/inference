@@ -57,7 +57,8 @@ nav. The order of the six sections is fixed in `docs/astro.config.mjs`.
 
 ## Content set
 
-★ = Phase 1 launch. Every page is justified by the CUJ it serves. 24 pages, 16 at launch.
+Every page is justified by the CUJ it serves. **24 pages, all written.** ★ marks the pages that
+carry an executed code sample.
 
 ### Home
 
@@ -79,15 +80,15 @@ nav. The order of the six sections is fixed in `docs/astro.config.mjs`.
 | `judge/index.mdx` | P1 | ★ | **Anchor.** Decision before mechanism. Ensemble → consensus → zones, with an errored run demonstrated forcing `human-review`. |
 | `judge/caching.mdx` | P2 | ★ | Key composition as the consumer's job. Replay costs nothing. The recheck-on-read pattern three consumers each invented. |
 | `judge/cost-and-budgets.mdx` | P3 | ★ | Unknown price is `undefined`; a gate over an unpriced model is **inert**, not satisfied. Overrides, and what is never charged. |
-| `judge/verdict-schema.mdx` | P4 | | Phase 2. The `EnsembleOptions.schema` override; descriptions as prompt surface; the runtime-not-compile-time shape hole. |
+| `judge/verdict-schema.mdx` | P4 | ★ | The `EnsembleOptions.schema` override; descriptions as prompt surface; the runtime-not-compile-time shape hole, reproduced in the sample. |
 
 ### Structured extraction (Marco)
 
 | Page | CUJ | ★ | Notes |
 |---|---|:--:|---|
 | `extract/index.mdx` | M1 | ★ | `completeValidatedJSON`, the retry contract, the `schema`/`validate` split, and the schema-identity memoization trap. No judge-layer vocabulary anywhere on this page. |
-| `extract/budgets-and-errors.mdx` | M2 | | Phase 2. Operational vs model failure, `InferenceError` translation, the soft ceiling, degrading rather than failing. |
-| `extract/subprocess-seam.mdx` | M3 | | Phase 2. `realExec` as a general-purpose helper; argv not shell; stdin over argv; `env: undefined` unsets; timer-based timeout. |
+| `extract/budgets-and-errors.mdx` | M2 | ★ | Operational vs model failure, `InferenceError` translation, the soft ceiling shown as five calls made and three charged. |
+| `extract/subprocess-seam.mdx` | M3 | ★ | `realExec` as a general-purpose helper; argv not shell; stdin over argv; `env: undefined` unsets; timer-based timeout. |
 
 ### Run models locally (Owen)
 
@@ -95,14 +96,14 @@ nav. The order of the six sections is fixed in `docs/astro.config.mjs`.
 |---|---|:--:|---|
 | `local/index.mdx` | O1 | ★ | Optional peer dependency, `makeProviderAsync` and why the sync form throws, the same contract unchanged, and the inert budget gate. |
 | `local/choosing-a-model.mdx` | O2 | ★ | Memory→tier table with the 3.5× headroom rule, the catalog, pinned blob paths, the four grammar behaviors, `thoughtTokens`. |
-| `local/managing-model-files.mdx` | O3 | | Phase 2. Where weights live and why the directory is owned; `dryRun` before the destructive form; the safety guarantees. |
+| `local/managing-model-files.mdx` | O3 | ★ | Where weights live and why the directory is owned; `dryRun` before the destructive form; the safety guarantees. |
 
 ### Keep it working (all personas)
 
 | Page | CUJ | ★ | Notes |
 |---|---|:--:|---|
 | `keep-it-working/testing.mdx` | X1 | ★ | The three seams — `MockProvider`, `ExecFn`, `LlamaRuntime`. Failure paths as the point. Closes by showing how this docset tests itself. |
-| `keep-it-working/upgrading.mdx` | U1 | | Phase 2. `JudgeRun` as a file format; what the library can and cannot invalidate; release channels. |
+| `keep-it-working/upgrading.mdx` | U1 | ★ | `JudgeRun` as a file format; what the library can and cannot invalidate; release channels; the recheck-on-read wrapper demonstrated. |
 
 ### Reference (lookup shelf — supports every journey)
 
@@ -114,9 +115,9 @@ nav. The order of the six sections is fixed in `docs/astro.config.mjs`.
 | `reference/cache.mdx` | P2, U1 | ★ | `JsonCache` constructor arity, `buildCacheKey`, `sha256`, and the on-disk file format. |
 | `reference/cost.mdx` | P3, M2 | ★ | `PRICE_TABLE` contents, `pricingFor` resolution order, `costOfUsage`, `costOfRuns`, `Pricing`. |
 | `reference/local-models.mdx` | O1, O2, O3 | ★ | The catalog, tiers and selectors, `LlamaCppProviderOptions`, `LlamaRuntime`, `clearLlamaModels`, `disposeLlamaModels`. |
-| `reference/exec.mdx` | M3 | | Phase 2. `realExec`, `ExecFn`, `ExecOptions`, `ExecResult`, and the two distinct default timeouts. |
-| `reference/errors-and-types.mdx` | all | | Phase 2. `InferenceError`, and the complete exported type index. |
-| `reference/glossary.mdx` | all | | Phase 2. Provider, run, verdict, consensus, zone, ensemble, selector, tier, seam. |
+| `reference/exec.mdx` | M3 | | `realExec`, `ExecFn`, `ExecOptions`, `ExecResult`, and the two distinct default timeouts. |
+| `reference/errors-and-types.mdx` | all | | `InferenceError`, and the complete exported type index, each row linking to the page that documents it. |
+| `reference/glossary.mdx` | all | | Provider, run, verdict, consensus, zone, ensemble, selector, tier, seam. |
 
 ### Supporting (not in the nav)
 
@@ -150,16 +151,16 @@ Two sources are contracts in their own right and outrank prose in the source fil
 - **`adrs/`** holds the reasoning. Where a Reference page explains *why*, the ADR is the source and
   should be linked rather than paraphrased at length.
 
-## Phased rollout
+## Status
 
-- **Phase 1 — Launch (★, 16 pages).** Home; both Get started pages; `judge/` index, caching, and
-  cost; `extract/` index; `local/` index and model choice; testing; and six Reference pages. This
-  covers every ★ journey end to end and every symbol a launch page mentions.
-- **Phase 2 — Depth (8 pages).** P4, M2, M3, O3, U1, and the `exec`, `errors-and-types`, and
-  `glossary` Reference pages. All eight ship at launch as stubs carrying their CUJ in frontmatter,
-  so no journey step points at a 404.
-- **Phase 3 — Polish.** A `CONTRIBUTING.md`, cross-persona refinements, and the automated
-  export-drift check described in `ia-gap-analysis.md`.
+All 24 pages are written and all 14 CUJs are walkable end to end. Fifteen pages carry executed code
+samples; the Reference shelf and the glossary are lookup content and carry none.
+
+Remaining work, none of it blocking:
+
+- A `CONTRIBUTING.md`. Contributor guidance still lives entirely in `CLAUDE.md`.
+- Signature-level drift checking. `scripts/check-docs-exports.mjs` proves every export is *mentioned*
+  on a Reference page; it cannot prove the documented signature is correct.
 
 ## Journey walk-through test
 

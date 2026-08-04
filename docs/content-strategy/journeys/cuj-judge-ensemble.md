@@ -35,8 +35,8 @@ steps:
     note: DEFAULT_ZONES is 0.8 / 0.8. What moving each threshold does, and what it cannot do.
   - stage: Word the verdict schema in your own domain
     doc: /judge/verdict-schema/
-    exists: partial
-    note: "[GAP] P4 depth. Stub exists; the schema-override walkthrough is Phase 2."
+    exists: true
+    note: P4 depth. Hands off to the schema-override walkthrough.
   - stage: Make repeat runs free
     doc: /judge/caching/
     exists: true

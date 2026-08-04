@@ -51,19 +51,40 @@ function pageFileFor(route) {
 
 const defined = new Set();
 const documents = [];
+const problems = [];
+
+/**
+ * Only audience, persona, and CUJ files declare an `id:`. Index files (`_overview.md`),
+ * the directory README, and the information_architecture specs are prose by design.
+ */
+const ENTITY_DIRS = new Set(["audiences", "personas", "journeys"]);
+function isEntityFile(file) {
+  const name = path.basename(file);
+  if (name.startsWith("_") || name === "README.md") return false;
+  return ENTITY_DIRS.has(path.basename(path.dirname(file)));
+}
 
 for (const file of files) {
-  const text = readFileSync(file, "utf8");
+  // Normalise line endings before parsing. A CRLF file would otherwise fail the
+  // frontmatter match silently, and every id it defines would look undefined —
+  // reporting danglers everywhere except the real problem.
+  const text = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
   const frontmatter = /^---\n([\s\S]*?)\n---/.exec(text);
-  if (frontmatter === null) continue;
+
+  if (frontmatter === null) {
+    if (isEntityFile(file)) problems.push(`${file}: no YAML frontmatter found`);
+    continue;
+  }
 
   const body = frontmatter[1];
   const id = /^id:\s*(\S+)/m.exec(body)?.[1];
-  if (id !== undefined) defined.add(id);
+  if (id === undefined) {
+    problems.push(`${file}: frontmatter defines no id:`);
+    continue;
+  }
+  defined.add(id);
   documents.push({ file, body, id });
 }
-
-const problems = [];
 
 for (const { file, body, id } of documents) {
   // 1. Danglers.
@@ -72,8 +93,6 @@ for (const { file, body, id } of documents) {
       problems.push(`${file}: references undefined id "${reference}"`);
     }
   }
-
-  if (id === undefined) continue;
 
   // 2. Orphans.
   if (id.startsWith("persona-")) {
@@ -92,9 +111,9 @@ for (const { file, body, id } of documents) {
 
   // 3. Live routes. `entry_point` plus every step's `doc:`.
   //
-  // `entry_point` carries no `exists:` of its own and is only required to resolve: a
-  // Phase 2 journey legitimately enters at a stub. Only a step that explicitly claims
-  // `exists: true` is held to the stronger "not still a stub" rule.
+  // `entry_point` carries no `exists:` of its own, so it is only required to resolve.
+  // Only a step that explicitly claims `exists: true` is held to the stronger
+  // "the page is not still a Planned stub" rule.
   const routes = [];
   const entryPoint = /^entry_point:\s*(\S+)/m.exec(body)?.[1];
   if (entryPoint !== undefined) {

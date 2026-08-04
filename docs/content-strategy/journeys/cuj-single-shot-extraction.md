@@ -38,8 +38,8 @@ steps:
     note: attempts defaults to 2, temperature to 0. What raising each does and does not buy.
   - stage: Gate on cost and degrade
     doc: /extract/budgets-and-errors/
-    exists: partial
-    note: "[GAP] Hands off to M2. Stub exists; the walkthrough is Phase 2."
+    exists: true
+    note: Hands off to M2.
   - stage: Look up the signatures
     doc: /reference/completion/
     exists: true

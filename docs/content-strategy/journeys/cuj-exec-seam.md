@@ -13,40 +13,38 @@ success_criteria: >
 steps:
   - stage: Learn the seam is public
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] realExec, ExecFn, ExecOptions, and ExecResult are exported and usable on their own. dockg drives git log with them. Nothing currently says so."
+    exists: true
+    note: realExec, ExecFn, ExecOptions, and ExecResult are exported and usable on their own. dockg drives git log with them.
   - stage: Run a command
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] realExec takes an argv array — no shell, so no quoting hazards. Returns code, stdout, stderr, timedOut, and spawnError rather than throwing."
+    exists: true
+    note: realExec takes an argv array — no shell, so no quoting hazards. Returns code, stdout, stderr, timedOut, and spawnError rather than throwing.
   - stage: Pass input over stdin
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] opts.input is piped and the stream closed. The claude-cli provider relies on this because user content routinely exceeds the ~32K Windows argv limit."
+    exists: true
+    note: opts.input is piped and the stream closed. The claude-cli provider relies on this because user content routinely exceeds the ~32K Windows argv limit.
   - stage: Unset an inherited environment variable
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] An env value of undefined unsets rather than blanks. dockg needed this to clear GIT_* vars, since empty string is not the same as unset to git. The type fix that shipped in 0.1.0."
+    exists: true
+    note: An env value of undefined unsets rather than blanks. dockg needed this to clear GIT_* vars, since empty string is not the same as unset to git. The type fix that shipped in 0.1.0.
   - stage: Survive a hostile child
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] The timeout settles on the timer itself, not on close, so a SIGTERM-ignoring child cannot hang the caller. Multi-byte UTF-8 straddling chunk boundaries decodes correctly."
+    exists: true
+    note: The timeout settles on the timer itself, not on close, so a SIGTERM-ignoring child cannot hang the caller. Multi-byte UTF-8 straddling chunk boundaries decodes correctly.
   - stage: Inject a fake for tests
     doc: /extract/subprocess-seam/
-    exists: partial
-    note: "[GAP] ExecFn is the seam. Pass one through ProviderSpec.exec for claude-cli, or into your own code, and never spawn in a unit test."
+    exists: true
+    note: ExecFn is the seam. Pass one through ProviderSpec.exec for claude-cli, or into your own code, and never spawn in a unit test.
   - stage: Look up the signatures
     doc: /reference/exec/
-    exists: partial
-    note: "[GAP] Stub exists. ExecFn, ExecOptions, ExecResult, realExec, and the two distinct default timeouts."
+    exists: true
+    note: ExecFn, ExecOptions, ExecResult, realExec, and the two distinct default timeouts.
 ---
 
 Using the package's subprocess helper for the host CLI's own commands, and injecting a fake to keep
 unit tests off the process table.
 
 Scoped to the exec seam. It is the one journey in this set that involves no model at all.
-
-**Phase 2.** The stub pages ship at launch carrying this CUJ; the walkthrough follows.
 
 ## Why a subprocess helper is in an inference library
 

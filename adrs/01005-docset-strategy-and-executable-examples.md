@@ -89,42 +89,65 @@ those outright, and the ban should not acquire an exception for convenience.
 `examples/` must stay out of the published tarball. `files: ["dist"]` already handles it, and
 `ci.yml`'s package-contents gate now asserts it explicitly, alongside `docs/`.
 
-## Decision 3: Doc Detective `runCode`, with assertions on the exit code
+## Decision 3: Doc Detective `runCode`, launching a repo file and asserting with `stdio`
 
-**Chosen: inline Doc Detective tests using `runCode`**, where each step is a small CommonJS
-launcher that runs an `examples/` file, captures its stdout, and asserts substrings:
+**Chosen: inline Doc Detective tests using `runCode`**, where each step is a one-line CommonJS
+launcher that runs an `examples/` file, and the step's own `stdio` field carries the assertion:
 
-```js
-const { execFileSync } = require("node:child_process");
-const assert = require("node:assert");
-const out = execFileSync("node", ["examples/first-call.mjs"], {
-  encoding: "utf8",
-  stdio: ["ignore", "pipe", "inherit"],
-});
-assert.ok(out.includes("Covers authentication and token refresh."), out);
+```jsonc
+{
+  "runCode": {
+    "language": "javascript",
+    "code": "process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))",
+    "stdio": "result: { summary: 'Covers authentication and token refresh.' }"
+  }
+}
 ```
 
-The launcher shape is forced by two verified properties of `doc-detective-core`'s `runCode`
-(measured against `doc-detective@4.0.0-beta.0`, not assumed):
+One assertion per step, so a failure names exactly which claim broke.
 
-1. **It writes the snippet to `os.tmpdir()` as a `.js` file and runs `node <tmpfile>`.** A bare
-   specifier cannot resolve from there — probed directly, `ERR_MODULE_NOT_FOUND`. And with no
-   `package.json` alongside it, a `.js` file is parsed as CommonJS, so an `import` statement cannot
-   parse at all. This package is ESM-only. A sample therefore **cannot** be inlined into a
-   `runCode` step; it has to be launched from a file in the repo.
+### Why a launcher rather than an inlined snippet
 
-2. **`runCode` rebuilds the step for `runShell` and forwards only `command` and `args`.** `stdio`,
-   `workingDirectory`, `timeout`, and the rest are dropped. Verified empirically: a step asserting
-   `stdio` against a string that is never printed **passes**. Exit codes survive, because
-   `runShell` re-applies its own `[0]` default.
+`runCode` writes the snippet to `os.tmpdir()` and runs `node <tmpfile>`. **Module resolution
+therefore happens from the temp directory, not from this repository**, so a bare specifier cannot
+resolve by either mechanism. Measured against `doc-detective@4.37.1`:
 
-So `stdio` cannot be used as the assertion mechanism — it would silently never run — and
-`workingDirectory` cannot be relied on. Assertions ride on the exit code via `node:assert`, and
-Doc Detective must be invoked from the repository root so the launchers' relative paths resolve.
-Both constraints are recorded in `.github/workflows/doc-detective.yml`.
+| Inlined into a `runCode` step | Result |
+|---|---|
+| `import { makeProvider } from "@hawkeyexl/inference"` | `ERR_MODULE_NOT_FOUND` |
+| `require("@hawkeyexl/inference")` | `MODULE_NOT_FOUND` |
 
-Rejected: `runShell` steps. They work, but the samples are multi-line TypeScript-shaped ESM, and
-the user asked for `runCode`; the launcher makes `runCode` work correctly.
+A sample therefore cannot be inlined; it has to be launched from a file inside the package, where
+self-reference resolves. That is the whole reason the launcher exists.
+
+### A correction worth recording
+
+An earlier revision of this ADR claimed `runCode` silently drops `stdio` and `workingDirectory`,
+and built the harness around `node:assert` because of it. **That was wrong.** It was measured
+against a stale vendored copy of `doc-detective@4.0.0-beta.0` found elsewhere on the machine, not
+against the current release. The behavior was real in that beta and has since been fixed upstream —
+`src/core/tests/runCode.ts` now forwards the options explicitly and documents the old drop as the
+bug it was.
+
+Re-measured against `4.37.1`:
+
+| Behavior | Result |
+|---|---|
+| `stdio` assertion | **honored** — a mismatch fails the step |
+| `exitCodes` | honored |
+| `workingDirectory`, absolute | honored |
+| `workingDirectory`, relative | fails on Windows with `ENOENT` (`-4058`) |
+
+So `stdio` is the assertion mechanism, which is both idiomatic and self-documenting in the step
+JSON. `workingDirectory` is left unset and Doc Detective is invoked from the repository root, so the
+launchers' relative paths resolve without depending on the one form that is not portable. That
+constraint is recorded in `.github/workflows/doc-detective.yml`.
+
+The lesson generalizes past this ADR: **verify against the version actually in use.** A vendored
+copy on disk is not evidence about the current release.
+
+Rejected: `runShell` steps. They would work — the launcher is a shell invocation in all but name —
+but `runCode` states the language explicitly and keeps the step readable.
 
 Also rejected: a vitest suite that imports each example. It would be simpler, but it would not
 verify the *page* — only the file. The `?raw` import plus an executed launcher is what closes the
