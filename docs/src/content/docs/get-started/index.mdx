@@ -15,10 +15,19 @@ unusable, and which of the two layers you actually need.
 
 ## Requirements
 
-- **Node 24 or later.**
-- **ESM only.** There is no CommonJS build; `require()` will not work.
+- **Node 24 or later.** Declared in `engines`. npm warns with `EBADENGINE` on an older version
+  rather than refusing to install, and there is no runtime version check — so an older Node fails
+  later and less clearly. Treat the warning as an error.
+- **ESM only.** The `exports` map exposes an `import` condition and no `require` one.
 
-Both are hard filters. If either is a problem, stop here rather than after writing code.
+`require("@hawkeyexl/inference")` therefore fails with **`ERR_PACKAGE_PATH_NOT_EXPORTED`** on every
+Node version. From CommonJS, use a dynamic import instead — that works:
+
+```js
+const { completeValidatedJSON } = await import("@hawkeyexl/inference");
+```
+
+If either constraint is a problem, better to know now than after writing code.
 
 ## Install
 

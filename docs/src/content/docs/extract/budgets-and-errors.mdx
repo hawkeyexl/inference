@@ -75,14 +75,24 @@ Checking afterwards means the overspend has already happened.
   [inert](/inference/judge/cost-and-budgets/#the-trap).
 </Aside>
 
-## Your ceiling is soft, in two ways
+## Your ceiling is soft, in three ways
 
 The last two lines of the sample output are the point: **five calls were made, three were charged.**
 
-1. **Gating before each call bounds the overshoot to one call.** It does not prevent one — the call
-   that crosses the line has already been paid for.
+1. **Gating before each call bounds the overshoot to one call — while the loop is sequential.** It
+   does not prevent one: the call that crosses the line has already been paid for.
 2. **A retried request reports only the successful attempt's usage.** The two rejected attempts on
    `errors.md` cost real input tokens that never reached the total.
+3. **Concurrency widens the bound.** The loop above is sequential, so exactly one call can be in
+   flight when the gate opens. Run subjects concurrently — which
+   [we recommend for ensembles](/inference/judge/at-scale/) — and up to *K* calls can clear the gate
+   before any of them adds to `spent`. The overshoot becomes K calls, not one.
+
+<Aside type="caution" title="Rule 1 and concurrency do not compose">
+  The one-call bound is a property of sequential iteration, not of the gate. If you add a worker
+  pool, recompute your headroom against the pool size. See
+  [running at scale](/inference/judge/at-scale/#the-budget-gate-under-concurrency).
+</Aside>
 
 Leave headroom. Treat the number as a bound with slack, not a measurement.
 

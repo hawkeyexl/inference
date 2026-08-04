@@ -1,9 +1,15 @@
-// Fail the docs build on a dead internal link.
+// Fail the docs build on a dead internal link — route *or* anchor.
 //
 // Starlight builds happily with a link to a page that does not exist, which is the
 // most common way a CUJ step in docs/content-strategy/journeys/ silently stops
 // resolving. This walks the built HTML and asserts that every in-site href resolves
 // to a route the build actually generated.
+//
+// It also validates `#fragment`s. Pages deep-link into each other's headings ~40
+// times, and every one of those anchors is derived from hand-chosen heading text —
+// rename a heading and the link still "works" in the sense that the page loads, but
+// drops the reader at the top with no indication anything is wrong. Nothing else
+// catches that.
 //
 // Exit 0 = all links resolve, 1 = dead links found, 2 = setup error.
 
@@ -44,19 +50,40 @@ const routes = new Set(
     }),
 );
 
+/** route -> the set of element ids on that page, for validating `#fragment` links. */
+const anchors = new Map();
+for (const file of files.filter((f) => path.basename(f) === "index.html")) {
+  const rel = path.relative(DIST, path.dirname(file)).split(path.sep).join("/");
+  const route = rel === "" ? "/" : `/${rel}/`;
+  const html = readFileSync(file, "utf8");
+  anchors.set(route, new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1])));
+}
+
 const dead = new Set();
+let anchorsChecked = 0;
+
 for (const file of files) {
   const html = readFileSync(file, "utf8");
   for (const match of html.matchAll(/href="([^"]+)"/g)) {
     const raw = match[1];
-    if (!raw.startsWith(`${BASE}/`)) continue; // external, anchor, or asset
+    if (!raw.startsWith(`${BASE}/`)) continue; // external, bare anchor, or asset
 
-    let route = raw.slice(BASE.length).replace(/[#?].*$/, "");
+    const withoutBase = raw.slice(BASE.length);
+    const [pathPart, fragment] = withoutBase.replace(/\?.*$/, "").split("#");
+
+    let route = pathPart;
     if (path.extname(route) !== "") continue; // an asset, not a page
     if (!route.endsWith("/")) route += "/";
 
     if (!routes.has(route)) {
-      dead.add(`${path.relative(DIST, file)} -> ${raw}`);
+      dead.add(`${path.relative(DIST, file)} -> ${raw}   (no such page)`);
+      continue;
+    }
+
+    if (fragment === undefined || fragment === "") continue;
+    anchorsChecked += 1;
+    if (!anchors.get(route)?.has(fragment)) {
+      dead.add(`${path.relative(DIST, file)} -> ${raw}   (page exists, #${fragment} does not)`);
     }
   }
 }
@@ -67,4 +94,7 @@ if (dead.size > 0) {
   process.exit(1);
 }
 
-console.log(`All internal links resolve across ${files.length} pages (${routes.size} routes).`);
+console.log(
+  `All internal links resolve across ${files.length} pages ` +
+    `(${routes.size} routes, ${anchorsChecked} anchor links checked).`,
+);

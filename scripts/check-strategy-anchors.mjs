@@ -39,13 +39,22 @@ try {
   process.exit(2);
 }
 
-/** A route like `/judge/caching/` maps to docs/src/content/docs/judge/caching.mdx. */
+/**
+ * A route like `/judge/caching/` maps to docs/src/content/docs/judge/caching.mdx.
+ *
+ * Both extensions are accepted: most pages are `.mdx` because they import components,
+ * but a page with no components (the 404) is plain `.md`, and Starlight serves both.
+ */
+const EXTENSIONS = [".mdx", ".md"];
 function pageFileFor(route) {
   const clean = route.replace(/^\/+|\/+$/g, "");
   const candidates =
     clean === ""
-      ? [path.join(PAGES_DIR, "index.mdx")]
-      : [path.join(PAGES_DIR, `${clean}.mdx`), path.join(PAGES_DIR, clean, "index.mdx")];
+      ? EXTENSIONS.map((ext) => path.join(PAGES_DIR, `index${ext}`))
+      : EXTENSIONS.flatMap((ext) => [
+          path.join(PAGES_DIR, `${clean}${ext}`),
+          path.join(PAGES_DIR, clean, `index${ext}`),
+        ]);
   return candidates.find((candidate) => existsSync(candidate));
 }
 

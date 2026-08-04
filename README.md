@@ -17,8 +17,11 @@ three times.
 npm install @hawkeyexl/inference
 ```
 
-Requires Node 24+. ESM only. Three runtime dependencies, plus one optional peer dependency for
-local models.
+Requires Node 24+. Three runtime dependencies, plus one optional peer dependency for local models.
+
+**ESM only.** The `exports` map has no `require` condition, so
+`require("@hawkeyexl/inference")` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. From CommonJS, use
+`await import("@hawkeyexl/inference")`.
 
 ## What it does
 

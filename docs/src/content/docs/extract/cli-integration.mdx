@@ -1,0 +1,148 @@
+---
+title: Wiring it into a CLI
+description: Per-subject statuses, an exit-code contract, a dry run that makes the real run free, and a confidence gate.
+sidebar:
+  order: 4
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import cliStatuses from '@examples/cli-statuses.mjs?raw';
+
+Turning a working call into a subcommand somebody else runs.
+
+Every consumer of this package built the same scaffolding around it — the same statuses, the same
+exit codes, the same dry-run semantics. That convergence is why this page exists: it is not
+incidental glue, it is the shape the library implies.
+
+## Give every subject a status
+
+A per-subject result is not a boolean. Four outcomes, and each needs to be distinguishable:
+
+| Status | Meaning | Called the model? |
+|---|---|---|
+| `filled` | proposed and written | yes |
+| `complete` | nothing was missing | **no** |
+| `low-confidence` | proposed, but below your threshold | yes |
+| `skipped-budget` | the ceiling stopped it first | **no** |
+| `error` | the call failed, or never validated | yes |
+
+`skipped-budget` is the one people collapse. Folding it into `error` makes a deliberate cost
+decision look like a failure; folding it into `complete` hides work that never happened.
+
+## The whole loop
+
+<Code code={cliStatuses} lang="js" title="examples/cli-statuses.mjs" />
+
+```text
+--- dry run ---
+  filled          auth.md
+  low-confidence  limits.md
+  complete        webhooks.md
+  filled          errors.md
+  skipped-budget  retries.md
+  calls: 3 | replays: 0 | spent $0.009000
+--- real run ---
+  filled          auth.md
+  low-confidence  limits.md
+  complete        webhooks.md
+  filled          errors.md
+  filled          retries.md
+  calls: 1 | replays: 3 | spent $0.003000
+  replayed from the dry run: 3
+  reached further on the re-run: skipped-budget -> filled
+exit code: 1
+```
+
+## A dry run is not free
+
+The natural reading of `--dry-run` is "skip the expensive part." For an LLM-backed command the
+expensive part has **already happened** by the time you decide not to write — the call was made and
+paid for. Only the write is skipped.
+
+What makes the pattern work is the cache:
+
+<Aside type="danger" title="Keep the dry-run flag out of the cache key">
+  If `dryRun` is part of the key, the real run misses everything the dry run paid for and you pay
+  twice. This is the single most expensive mistake on this page, and it looks perfectly reasonable
+  in a diff.
+</Aside>
+
+In the sample output, the real run makes **one** call instead of four: three subjects replay from
+what the dry run already bought.
+
+## Cache before you gate
+
+Notice the ordering:
+
+```js
+proposal = result.result;
+cache.set(key, proposal);          // cache the raw proposal...
+if (proposal.confidence < MIN_CONFIDENCE) { /* ...then gate */ }
+```
+
+Caching the **pre-gated** proposal means sweeping the threshold costs nothing — re-run with a
+different `--confidence` and every subject re-gates from cache. Gate before caching and every sweep
+is a fresh bill.
+
+## Skip before you spend
+
+Two things belong in the key that are easy to leave out:
+
+```js
+buildCacheKey([
+  provider.provider(),
+  provider.modelName(),
+  `v${PROMPT_VERSION}`,
+  sha256([...doc.missing].sort().join(",")),  // the existing state
+  sha256(doc.path),
+]);
+```
+
+Putting **what is still missing** in the key makes a re-run *additive*: after a partial fill, the
+second run asks the model for what remains rather than replaying a proposal already applied. And a
+subject with nothing missing short-circuits to `complete` before any of this — no key, no call.
+
+Sort the field set before hashing, or two orderings of the same fields become two keys.
+
+## Exit codes
+
+```text
+0  clean
+1  findings — something needs a human
+2  operational — the tool could not run
+```
+
+`2` is where a translated `InferenceError` lands, which is why
+[translating at the boundary](/inference/extract/budgets-and-errors/#translate-inferenceerror-at-the-boundary)
+matters: an untranslated one escapes as a crash with the wrong code.
+
+`low-confidence` and `skipped-budget` are findings, not failures — the tool worked, the result needs
+attention.
+
+## A cached re-run gets further
+
+The last line of the sample output is worth reading twice:
+
+```text
+reached further on the re-run: skipped-budget -> filled
+```
+
+`retries.md` was cut off by the ceiling during the dry run. On the real run the first three subjects
+replayed for free, so the budget was still intact when the loop reached it.
+
+That is the intended interaction, and it is a good reason to make re-running cheap and habitual —
+but it also means **a budget-limited run is not deterministic across invocations**. If you need
+reproducibility, cache first and gate on a fixed subject list rather than on remaining budget.
+
+## Next
+
+- [Running at scale](/inference/judge/at-scale/) — concurrency around this loop
+- [Caching](/inference/judge/caching/) — key composition and where the cache lives
+- [Budgets and errors](/inference/extract/budgets-and-errors/) — the two error classes
+
+{/* test {"testId":"cli-statuses","description":"Status enum, dry-run replay, confidence gating, and the budget interaction with a warm cache."} */}
+{/* step {"description":"A subject with nothing missing is completed without calling the model.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cli-statuses.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"complete        webhooks.md"}} */}
+{/* step {"description":"A proposal below the confidence threshold is not written.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cli-statuses.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"low-confidence  limits.md"}} */}
+{/* step {"description":"The real run replays what the dry run already paid for.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cli-statuses.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"replayed from the dry run: 3"}} */}
+{/* step {"description":"Free replays leave budget intact, so the re-run reaches a subject the dry run had skipped.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/cli-statuses.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"reached further on the re-run: skipped-budget -> filled"}} */}
+{/* test end */}

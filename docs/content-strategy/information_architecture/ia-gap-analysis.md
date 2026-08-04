@@ -182,9 +182,51 @@ The last one is the most serious. It is stated in this repo's own `CLAUDE.md` an
 None. The IA was built CUJ-first, so no page exists without a journey to justify it. This section
 stays as a standing check: **if a future page cannot name its CUJ, it does not belong in the nav.**
 
+## Found after launch
+
+A second audit — against `src/` directly and against all three consumers — found two clusters the
+first pass missed, plus three shipped statements that were wrong. All are now closed.
+
+### 12. Failure had no home · X2
+
+Of **20 throw sites, 2 messages appeared verbatim and 15 had no coverage at all.** No troubleshooting
+page, no error reference, no custom 404. Pagefind indexed none of the strings a stuck reader would
+paste — including `No inference provider is available. Tried:`, the first failure on the zero-config
+path the docs actively recommend.
+
+Structural rather than editorial: **no CUJ covered a failed run**, so no page was ever chartered.
+The docset documented the *policy* of failure on five pages and almost none of the *instances*.
+
+*Closed by:* the `troubleshooting/` track, `reference/errors.mdx`, `reference/warnings.mdx`, a
+custom `404.md`, and `scripts/check-error-coverage.mjs` gating the reference against `src/`.
+
+### 13. Orchestration above the library was invisible · P5, M4, X3
+
+Every consumer wrote the same code and no page showed it: concurrency across subjects (asserted
+twice, demonstrated never), dry-run over paid calls, cache directory layout and the depth-agnostic
+gitignore, skip-before-spend keys, confidence-gated writes, the status enum with exit codes, and the
+boundary of what stays in the consumer's repo — a paragraph all three wrote into their own
+contributor instructions *because the library never said it*.
+
+*Closed by:* `judge/at-scale.mdx`, `extract/cli-integration.mdx`, `keep-it-working/boundary.mdx`,
+and a new section on `judge/caching.mdx`.
+
+### 14. Three shipped statements were wrong
+
+- **The budget bound.** "Gating before each call bounds the overshoot to one call" holds only under
+  sequential iteration, while the same docset recommends concurrency. Under a pool of K the bound is
+  K calls. Both pages now state the condition and link each other.
+- **Node 24 as a "hard requirement."** No runtime guard, no `engine-strict` — an `EBADENGINE`
+  warning.
+- **The ESM claim, which was right after all.** The audit reported "`require()` will not work" as
+  false, having tested a *file path* that bypasses the `exports` map. The real consumer path fails
+  with `ERR_PACKAGE_PATH_NOT_EXPORTED`. What was missing was the error code and the fact that
+  `await import()` from CommonJS works. Recorded because it is the second confident finding in this
+  docset's history that came from measuring the wrong thing.
+
 ## Status
 
-All 24 pages are written and all 14 CUJs are walkable end to end. Every CUJ step is `exists: true`,
+All 32 pages are written and all 18 CUJs are walkable end to end. Every CUJ step is `exists: true`,
 and `scripts/check-strategy-anchors.mjs` fails the build if one of those routes stops resolving or
 starts pointing at a stub.
 

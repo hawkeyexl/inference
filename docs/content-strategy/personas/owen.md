@@ -38,6 +38,8 @@ journeys:
   - cuj-manage-model-files
   - cuj-test-without-network
   - cuj-upgrade-safely
+  - cuj-diagnose-a-failed-run
+  - cuj-know-the-boundary
 ---
 
 Owen owns the environment, not the integration. Someone else's tool — Priya's, Marco's, or his

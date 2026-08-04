@@ -1,0 +1,211 @@
+---
+title: Error reference
+description: Every error message the library can produce, what triggers it, and how to fix it.
+sidebar:
+  order: 8
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every message the library can produce, verbatim, with its trigger and its fix.
+
+If you arrived with a message in hand, use your browser's find. If you are not sure which class of
+failure you have, start at [diagnosing a failure](/inference/troubleshooting/).
+
+<Aside type="note" title="Two classes, and it matters which you have">
+  **Operational** failures are thrown as `InferenceError`, at construction, before any call. Catch
+  them. **Model** failures are never thrown — they arrive on `run.error` with `result` absent.
+  Check them.
+</Aside>
+
+## Operational — thrown as `InferenceError`
+
+### `Anthropic provider needs <VAR> set (or choose another provider)`
+
+The Anthropic provider was constructed and `process.env[apiKeyEnv]` was empty. `<VAR>` is
+`ANTHROPIC_API_KEY` unless you set `apiKeyEnv`.
+
+**Fix:** export the key, name a different provider, or omit `provider` entirely and let
+[detection](/inference/get-started/choose-a-provider/#or-dont-choose) pick one that works.
+
+### `OpenAI provider needs <VAR> set (or point baseUrl at a local server)`
+
+Same, for the OpenAI-compatible provider. A key is required **only** when `baseUrl` contains
+`api.openai.com`; a keyless local server is allowed.
+
+**Fix:** export the key, or set `baseUrl` to your local endpoint.
+
+### `No inference provider is available. Tried:`
+
+Detection ran every probe and none succeeded. The message continues with one line per provider
+explaining why each was unavailable, then `Pass an explicit provider, set one of the keys above, or
+install node-llama-cpp.`
+
+The reason lines are:
+
+| Reason | Meaning |
+|---|---|
+| `ANTHROPIC_API_KEY is not set` | no Anthropic key in the environment |
+| `OPENAI_API_KEY is not set and no baseUrl was given` | no OpenAI key **and** no local endpoint |
+| `could not run \`claude\` (is the Claude CLI installed?)` | the CLI is absent or not on `PATH` |
+| `node-llama-cpp is not installed (npm i node-llama-cpp)` | the optional peer dependency is missing |
+| `node-llama-cpp could not start (…)` | installed, but the native binding failed to load |
+| `not auto-selectable` | only ever shown for `mock`, which detection never picks |
+
+**Fix:** whichever line is closest to your situation. This is the most common first failure on a
+machine with no credentials — see
+[common failures](/inference/troubleshooting/common-failures/#no-provider-is-available).
+
+### `No provider specified. Detecting one probes the environment, …`
+
+```text
+No provider specified. Detecting one probes the environment, the Claude CLI and the local
+model runtime, which cannot be done synchronously — use
+resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai,
+claude-cli, mock, llama-cpp).
+```
+
+You called the **synchronous** `makeProvider` or `resolveProviderIdentity` with `provider` omitted
+or set to `"auto"`.
+
+**Fix:** `await makeProviderAsync(spec)`, or name a provider.
+
+### `llama-cpp model "<M>" is a selector and cannot be resolved synchronously — …`
+
+A selector (`auto`, `fast`, `balanced`, `quality`) reached a synchronous factory. Resolving it reads
+GPU memory.
+
+**Fix:** `await makeProviderAsync(spec)`, or name a concrete model. The refusal is deliberate:
+recording `"auto"` as cache-key material would let two differently-sized models share results.
+
+### `llama-cpp model "<M>" is a selector and needs a hardware probe to resolve.`
+
+The same cause reaching a different entry point — `resolveLlamaModelRef`, and through it
+`blobNameFor`, `isModelDownloaded`, or `clearLlamaModels({ models })`.
+
+**Fix:** resolve the selector first, or pass a concrete alias to those helpers.
+
+### `llama-cpp model "<M>" is a selector. Constructing a provider directly needs a concrete model …`
+
+`new LlamaCppProvider("auto")` — the class constructor rather than a factory.
+
+**Fix:** `await makeProviderAsync({ provider: "llama-cpp" })`.
+
+### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, mock, llama-cpp.`
+
+A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
+
+**Fix:** use one of the listed names. If the value came from user input, validate it before building
+the spec — every existing consumer does exactly this.
+
+### `Unknown llama-cpp model "<M>". Use a selector …, a curated alias …, an hf: URI, or a path to a .gguf file.`
+
+The model reference matched no accepted form.
+
+<Aside type="caution" title="A bare user/repo is rejected on purpose">
+  `unsloth/gemma-4-e4b` is **not** accepted. It is almost always a mistyped alias, and guessing would
+  download the wrong weights. Use `hf:user/repo/file.gguf` for a real Hugging Face reference.
+</Aside>
+
+### `The llama-cpp provider needs the optional peer dependency node-llama-cpp. Install it with: npm i node-llama-cpp`
+
+The dynamic import failed. The original error is appended in parentheses.
+
+**Fix:** `npm install node-llama-cpp`. It is an optional peer dependency and is never installed for
+you.
+
+## Model failures — recorded on `run.error`
+
+None of these throw. Each arrives with `result` (or `verdict`) absent.
+
+### `Response failed schema validation: <path> <message>; …`
+
+Ajv rejected the response on the final attempt. One clause per validation error, joined with `; `.
+
+**Fix:** usually the schema, not the model. Check the shape is expressible — and if you are on a
+local model, that you are not relying on `required` or numeric bounds, which
+[a grammar does not enforce](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+
+### `Response contained no parseable JSON object`
+
+`extractJson` found nothing usable — no bare object, no fenced block, no object embedded in prose.
+Shared by **`openai`, `claude-cli`, and `llama-cpp`**.
+
+**Fix:** most often a model that answered in prose. Tighten the system prompt, or use a provider
+with native structured output.
+
+### `<provider message>` — or `HTTP <status>`
+
+The OpenAI-compatible endpoint returned a non-2xx. The provider's own `error.message` is passed
+through verbatim; when the body has none you get `HTTP 401`, `HTTP 429`, `HTTP 500`.
+
+<Aside type="danger" title="A 429 does not look like a rate limit">
+  It arrives as an ordinary errored run, and an errored run
+  [forces `human-review`](/inference/judge/#the-exact-boundaries). Under concurrency a rate limit
+  therefore shows up as a growing review queue rather than as an error. See
+  [running at scale](/inference/judge/at-scale/#what-a-429-actually-becomes).
+</Aside>
+
+### `Empty completion response`
+
+The endpoint returned 2xx but `choices[0].message.content` was missing or empty.
+
+### `Anthropic response hit max_tokens (<N>) before completing the tool call — raise the anthropic.maxTokens option.`
+
+The forced tool call was truncated. Guarded early and reported as itself rather than being allowed
+to fail validation, which would have burned the retry on a misleading error.
+
+**Fix:** raise `anthropic.maxTokens` (default 1024).
+
+### `Anthropic response contained no tool_use block`
+
+The response came back without the forced tool call. Rare; usually a refusal.
+
+### `llama-cpp generation hit the token limit before completing the JSON (maxTokens: <N>) — raise llamaCpp.maxTokens, or shorten the prompt if the context is full.`
+
+The local-model equivalent of the above.
+
+**Fix:** raise `llamaCpp.maxTokens`, or shorten the prompt.
+
+### `Failed to run <cmd>: <spawnError> (is the Claude CLI installed?)`
+
+The Claude CLI process could not start.
+
+**Fix:** install the CLI, or set `command` to its path. `ENOENT` here means "not on `PATH`".
+
+### `Claude CLI timed out`
+
+Exceeded `timeoutMs` (default 180000).
+
+### `Claude CLI exited <code>: <last 300 chars of stderr>`
+
+Non-zero exit. The stderr tail is included because it usually holds the real reason — most often
+that you are not logged in.
+
+**Fix:** run `claude` yourself once to confirm it works and that you are authenticated.
+
+### `Claude CLI returned no result field`
+
+The CLI's JSON envelope had no string `result`.
+
+<Aside type="caution" title="Malformed CLI output surfaces as a raw SyntaxError">
+  If the CLI prints something that is not JSON at all — an update banner, a login prompt — the
+  envelope parse throws before this check, and a bare `SyntaxError: Unexpected token …` reaches
+  `run.error`. Unmistakable once you know to expect it.
+</Aside>
+
+### `MockProvider needs at least one scripted response`
+
+`new MockProvider([])`. Test-only.
+
+### `Empty command`
+
+Not an error but a field: `realExec([])` returns `spawnError: "Empty command"`. See the
+[exec reference](/inference/reference/exec/#execresult).
+
+## See it for yourself
+
+Every message above is provoked for real by
+[`examples/diagnose-errors.mjs`](https://github.com/hawkeyexl/inference/blob/main/examples/diagnose-errors.mjs),
+which runs in CI. `scripts/check-error-coverage.mjs` fails the build if a `throw` in `src/` has no
+entry on this page — so this reference cannot quietly fall behind the code.

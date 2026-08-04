@@ -40,6 +40,10 @@ journeys:
   - cuj-exec-seam
   - cuj-test-without-network
   - cuj-upgrade-safely
+  - cuj-run-at-scale
+  - cuj-wire-into-a-cli
+  - cuj-diagnose-a-failed-run
+  - cuj-know-the-boundary
 ---
 
 Marco maintains a CLI whose main job is deterministic and reproducible. He is adding one optional

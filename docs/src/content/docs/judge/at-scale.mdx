@@ -1,0 +1,133 @@
+---
+title: Running at scale
+description: Run ensembles across many subjects with a bounded pool, and understand what concurrency does to your budget and your review queue.
+sidebar:
+  order: 4
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import orchestrate from '@examples/orchestrate-concurrency.mjs?raw';
+
+The ensemble works for one subject. Now it has to run over hundreds.
+
+Everything here lives **above** the library. That is deliberate, and this page explains both how to
+build it and the two ways it changes guarantees stated elsewhere.
+
+## Where concurrency belongs
+
+Runs inside an ensemble are **sequential and stay that way**. `runs: 5` is five calls one after
+another. Concurrency belongs one level up — across subjects — where you control the pool size, the
+ordering, and the budget.
+
+That is a real design choice, not an omission. Parallelising inside an ensemble would multiply the
+request rate by `runs` for no benefit: the samples are already independent.
+
+## A bounded pool
+
+<Code code={orchestrate} lang="js" title="examples/orchestrate-concurrency.mjs" />
+
+```text
+ceiling:      $0.045
+sequential:   spent $0.045 | skipped 7
+concurrency 4: spent $0.072 | skipped 4
+extra ensembles under concurrency: 3
+order preserved: true
+first three: page-01.md page-02.md page-03.md
+```
+
+Three details in that code are easy to get wrong:
+
+1. **Not `Promise.all(subjects.map(...))`.** That launches every subject at once. The pool caps how
+   many are in flight by having a fixed number of workers pull from a shared cursor.
+2. **Assign results by index.** A pool finishes out of order. Writing `results[i] = …` keeps the
+   output aligned with the input, which `Promise.all` would have given you for free and a pool
+   takes away.
+3. **One provider per worker if you are using `MockProvider`.** It records every request, and
+   sharing one across workers interleaves them. A real provider is stateless and can be shared.
+
+## The budget gate under concurrency
+
+<Aside type="danger" title="Concurrency widens the overshoot bound">
+  [Budgets and errors](/inference/extract/budgets-and-errors/#your-ceiling-is-soft-in-three-ways)
+  states that gating before each call bounds the overshoot to one call. **That is a property of
+  sequential iteration, not of the gate.**
+</Aside>
+
+The gate is a read-then-act on a shared counter:
+
+```js
+if (pricing !== undefined && spent >= maxCostUsd) { /* skip */ }
+// ... await the call ...
+spent += costOfRuns(runs, pricing);
+```
+
+With K workers, up to K subjects can pass the check before any of them adds to `spent`. The sample
+output measures it: the same ceiling, the same subjects, `$0.045` sequential against `$0.072` at
+concurrency 4 — **three extra ensembles, one per additional worker.**
+
+So the rule generalises to: **the overshoot is bounded by your pool size.** Budget for
+`maxCostUsd + (K - 1) × cost_per_subject`, or gate on a reservation rather than on spend if you need
+a hard ceiling.
+
+## What a 429 actually becomes
+
+This is the consequence that surprises people, and it follows from two rules already documented
+separately.
+
+1. A rate limit is [recorded on `run.error`](/inference/reference/errors/) like any other provider
+   failure. It does not throw.
+2. Any errored run in an ensemble
+   [forces `human-review`](/inference/judge/#the-exact-boundaries).
+
+Therefore: **a rate limit does not surface as a rate limit. It surfaces as a growing human-review
+queue.**
+
+That reads like the model becoming less certain about your subjects, which invites tuning
+thresholds — exactly the wrong response. If your review pile grows right after you raise
+concurrency, lower the concurrency before you touch anything else.
+
+There is no backoff in the library, and none of the existing consumers implement one. If you need
+it, it goes in your worker loop.
+
+## Choosing `runs: N`
+
+`runs` multiplies both cost and latency linearly, and buys confidence:
+
+| `runs` | Buys | Costs |
+|---|---|---|
+| 1 | a single opinion; `agreement` is always 1.0 and meaningless | 1× |
+| **3** | a majority, and disagreement becomes visible | 3× |
+| 5 | finer-grained agreement ratios | 5× |
+
+**3 is the common default** — both production eval consumers arrived at it independently. Below 3
+the consensus math has nothing to work with; above it you are paying linearly for a slowly improving
+signal.
+
+If you want diversity, prefer more runs to a higher temperature. Independent samples at temperature
+0 are already independent, and raising temperature
+[warns for a reason](/inference/reference/warnings/).
+
+## Estimating a run
+
+The library reports `durationMs` per run but makes no latency promises. Because ensembles are
+sequential, the arithmetic is at least predictable:
+
+```text
+wall clock  ≈  (subjects / concurrency) × runs × per_call_latency
+cost        ≈  subjects × runs × per_call_cost      (before cache hits)
+```
+
+Run one subject first and read `durationMs` and `usage` off the result. That is a far better
+estimate than any number this page could print, and it costs one call.
+
+## Next
+
+- [Caching](/inference/judge/caching/) — the cheapest call is the one you do not make
+- [Budgets and errors](/inference/extract/budgets-and-errors/) — the sequential statement of the gate
+- [Wire it into a CLI](/inference/extract/cli-integration/) — statuses and exit codes around this loop
+
+{/* test {"testId":"orchestrate-concurrency","description":"A bounded pool across subjects, order preservation, and the budget overshoot that concurrency introduces."} */}
+{/* step {"description":"The sequential run stops exactly at the ceiling.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/orchestrate-concurrency.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"sequential:   spent $0.045"}} */}
+{/* step {"description":"With four workers the same ceiling overshoots by three extra ensembles — one per additional worker.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/orchestrate-concurrency.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"extra ensembles under concurrency: 3"}} */}
+{/* step {"description":"Assigning results by index keeps the input order a worker pool would otherwise lose.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/orchestrate-concurrency.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"order preserved: true"}} */}
+{/* test end */}

@@ -1,0 +1,117 @@
+---
+title: Diagnosing a failure
+description: Start from the symptom. One question separates the two failure classes, and the fix follows from which one you are in.
+sidebar:
+  order: 1
+---
+
+import { Aside, Code, Steps } from '@astrojs/starlight/components';
+import diagnoseErrors from '@examples/diagnose-errors.mjs?raw';
+
+Something failed. Start here.
+
+Every other page in this documentation is organised by what you are **building**. This one is
+organised by what you are **seeing**, because when a run fails you do not yet know which layer you
+are in.
+
+## The one question
+
+> **Did it throw, or did it come back on `run.error`?**
+
+That single split does most of the diagnosis:
+
+| | Threw | Came back on `run.error` |
+|---|---|---|
+| **Type** | `InferenceError` | a string on the run |
+| **When** | at construction, before any call | after the call, after both attempts |
+| **Means** | your configuration is wrong | the model or the provider failed |
+| **Costs** | nothing — no call was made | tokens, usually |
+| **Fix** | change the spec, the environment, or the call | change the schema, the prompt, or your handling |
+
+Everything else follows. If you have a message in hand, go straight to the
+[error reference](/inference/reference/errors/) and use your browser's find.
+
+## Both classes, side by side
+
+<Code code={diagnoseErrors} lang="js" title="examples/diagnose-errors.mjs" />
+
+```text
+[operational]
+ 1. InferenceError: Anthropic provider needs NOT_SET_XYZ set (or choose another provider)
+ 2. InferenceError: No provider specified. Detecting one probes the environment, the Claude CLI and the local model runtime, which cannot be done synchronously — use resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai, claude-cli, mock, llama-cpp).
+ 3. InferenceError: llama-cpp model "auto" is a selector and cannot be resolved synchronously — picking a tier probes GPU memory. Use resolveProviderIdentityAsync/makeProviderAsync, or name a concrete model (e.g. "gemma-4-e4b").
+ 4. InferenceError: Unknown provider "nope". Available: anthropic, openai, claude-cli, mock, llama-cpp.
+ 5. InferenceError: Unknown llama-cpp model "not-a-model". Use a selector (auto, fast, balanced, quality), a curated alias (gemma-4-e2b, gemma-4-e4b, gemma-4-12b, gemma-4-26b-a4b, gemma-4-e2b-q2), an hf: URI, or a path to a .gguf file.
+ 6. Error: MockProvider needs at least one scripted response
+
+[model failure — recorded, never thrown]
+ 7. run.error: Response failed schema validation:  must have required property 'ok'
+    run.result: undefined
+ 8. run.error: 429 rate limited
+ 9. Error: Response contained no parseable JSON object
+
+[claude-cli subprocess]
+10. Failed to run claude: ENOENT (is the Claude CLI installed?)
+11. Claude CLI timed out
+12. Claude CLI exited 1: not logged in
+13. Claude CLI returned no result field
+
+[what it costs you]
+14. two runs passed confidently, one errored
+    votes: {"pass":2,"fail":0,"partial":0,"error":1}
+    zone: human-review — a rate limit becomes a review queue, not an error
+```
+
+<Aside type="tip" title="These are the real messages">
+  That output is produced by running the library, not transcribed from it. CI executes this file on
+  every pull request, so the strings on the [error reference](/inference/reference/errors/) cannot
+  drift away from the ones you will actually see.
+</Aside>
+
+## Work through it
+
+<Steps>
+
+1. **Read the last line of the message, not the first.** Nearly every operational error names the
+   fix at the end — `use makeProviderAsync`, `npm i node-llama-cpp`, `Available: …`.
+
+2. **If it threw, nothing was spent.** Operational failures happen at construction. You can retry
+   freely.
+
+3. **If it came back on the run, check `run.error` — not a `try`/`catch`.** A model failure never
+   throws. If you are wrapping the call in `try`/`catch` and seeing nothing, this is why.
+
+4. **Look for a warning you missed.** The library writes four of them to `console.warn`, and two
+   fire exactly once per process. See the [warnings reference](/inference/reference/warnings/).
+
+5. **Check whether the failure was silent.** An errored run inside an ensemble does not surface as
+   an error — it forces `human-review`. A growing review queue is a symptom worth reading as
+   infrastructure trouble rather than model uncertainty.
+
+</Steps>
+
+## The one that is easy to misread
+
+A `429` is recorded like any other provider failure, and any errored run in an ensemble
+[forces `human-review`](/inference/judge/#the-exact-boundaries).
+
+So a rate limit does not appear as a rate limit. It appears as more results needing human attention
+— which reads like the model getting less certain, and invites exactly the wrong response. If your
+review queue grows after you raise concurrency, read
+[running at scale](/inference/judge/at-scale/#what-a-429-actually-becomes) before you tune anything
+else.
+
+## Next
+
+- [Common failures](/inference/troubleshooting/common-failures/) — the ones worth prose
+- [Error reference](/inference/reference/errors/) — every message, verbatim
+- [Warnings reference](/inference/reference/warnings/) — the four `console.warn` paths
+- [Budgets and errors](/inference/extract/budgets-and-errors/) — how to handle each class in code
+
+{/* test {"testId":"diagnose-errors","description":"Both failure classes provoked for real, so the documented messages cannot drift."} */}
+{/* step {"description":"A missing credential throws InferenceError at construction, before any call.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"InferenceError: Anthropic provider needs NOT_SET_XYZ set (or choose another provider)"}} */}
+{/* step {"description":"An unknown provider name lists the available ones.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Unknown provider \"nope\". Available: anthropic, openai, claude-cli, mock, llama-cpp."}} */}
+{/* step {"description":"A schema failure is recorded on the run rather than thrown, and result stays absent.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"run.result: undefined"}} */}
+{/* step {"description":"Each claude-cli subprocess failure reports its own distinct message.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Failed to run claude: ENOENT (is the Claude CLI installed?)"}} */}
+{/* step {"description":"An errored run turns a confident ensemble into a review, which is how a rate limit hides.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"zone: human-review"}} */}
+{/* test end */}

@@ -39,6 +39,12 @@ jobs:
       - name: Docs export coverage
         run: node scripts/check-docs-exports.mjs
 
+      # Runs here rather than in docs.yml on purpose: rewording a `throw` is a src/
+      # change, and docs.yml is path-filtered to docs/** and examples/**. It would
+      # never fire for the change most likely to break the error reference.
+      - name: Error reference coverage
+        run: node scripts/check-error-coverage.mjs
+
       # The package is consumed by four sibling repos; a broken exports map
       # or a missing dist/ is a downstream outage, so gate on the tarball.
       - name: Package contents gate

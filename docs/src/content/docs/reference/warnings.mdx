@@ -1,0 +1,100 @@
+---
+title: Warnings reference
+description: The four warnings the library writes to console.warn, when each fires, and how to reset them in tests.
+sidebar:
+  order: 9
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The library writes to `console.warn` in exactly four places. Nothing else in the docset says so,
+which matters if your tool owns its own output formatting.
+
+Each warning fires **at most once**, but the scope of "once" differs per warning, and that catches
+people out in tests.
+
+## The four
+
+| Warning | Fires once per | Reset with |
+|---|---|---|
+| Nonzero judge temperature | module | `resetTemperatureWarning()` |
+| Cache write failure | **cache instance** | construct a new `JsonCache` |
+| Provider auto-selected | process | `resetProviderDetectionWarning()` |
+| Local weights not downloaded | process | `resetProviderDetectionWarning()` |
+
+### `<label>: judge temperature is <N> — nonzero temperature adds noise to verdicts; 0 is strongly recommended.`
+
+Fires when `runEnsemble` or `judge` gets `temperature > 0`. `<label>` is `EnsembleOptions.label`,
+default `inference`.
+
+Independent samples at temperature 0 are already independent — the provider is called separately
+each time with no shared state. If you want diversity, more runs beats more randomness.
+
+### `<label>: could not write the cache at <dir> (<message>). Continuing without caching.`
+
+Fires when a cache write fails — a read-only workspace, a full disk, a permissions problem. The run
+continues, because [the cache is an optimization, never a
+dependency](/inference/judge/caching/#a-write-failure-never-aborts-a-run).
+
+<Aside type="caution" title="This one is per instance, not per process">
+  Two `JsonCache` objects pointing at the same broken directory warn twice. That is deliberate — a
+  tool with a judge cache and a fill cache should hear about both — but it means a test asserting
+  "warns once" must reuse one instance.
+</Aside>
+
+### `inference: <reason> — auto-selected "<provider>". Pass an explicit provider to pin it.`
+
+Fires when detection picks a provider for you. `<reason>` is either `provider "auto"` or
+`no provider specified`.
+
+It exists because an environment variable appearing or disappearing between runs otherwise silently
+changes what an eval measured. Pin the provider and the warning goes away.
+
+### `inference: "<model>" is not downloaded yet — the first run will fetch ~<N> GB. Pre-fetch it, or pass an explicit provider to avoid the local model entirely.`
+
+Fires when detection lands on `llama-cpp` and the weights are absent — before the download starts,
+so you can still stop it.
+
+<Aside type="note" title="Deliberately silent on a cached run">
+  This fires from `makeProviderAsync` only, **not** from `resolveProviderIdentityAsync`. A run served
+  entirely from cache resolves identity without constructing a provider, so it never warns about a
+  download it is not going to do.
+</Aside>
+
+## Capturing or silencing them
+
+There is no log-level option. If your tool formats its own output, wrap `console.warn` for the
+duration of the call:
+
+```js
+const warnings = [];
+const original = console.warn;
+console.warn = (...args) => warnings.push(args.join(" "));
+try {
+  await judge({ provider, system, user, runs: 3 });
+} finally {
+  console.warn = original;
+}
+```
+
+Everything the library emits is prefixed — with `inference:` for detection, and with your `label`
+for the temperature and cache warnings — so filtering by prefix is reliable.
+
+## Resetting them in tests
+
+```ts
+import { resetProviderDetectionWarning, resetTemperatureWarning } from "@hawkeyexl/inference";
+
+beforeEach(() => {
+  resetTemperatureWarning();
+  resetProviderDetectionWarning();  // resets both detection warnings
+});
+```
+
+Without this, a test that runs second sees no warning and a "warns once" assertion passes for the
+wrong reason. `resetClaudeCliProbe()` is a third seam — it forgets the memoised `claude --version`
+probe rather than a warning.
+
+## Source of truth
+
+`src/judge/ensemble.ts`, `src/cache.ts`, and `src/providers/detect.ts`.
