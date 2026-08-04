@@ -1,0 +1,135 @@
+---
+title: Managing model files
+description: Where weights live, how to relocate them, and how to reclaim disk without destroying models something else owns.
+sidebar:
+  order: 3
+---
+
+import { Aside, Code, Steps } from '@astrojs/starlight/components';
+import manageModelFiles from '@examples/manage-model-files.mjs?raw';
+
+Finding multi-gigabyte weights, moving them somewhere with room, and deleting them safely.
+
+Choosing what to download is [choosing a model](/inference/local/choosing-a-model/). Signatures are
+in the [local models reference](/inference/reference/local-models/#model-files-on-disk).
+
+## Where weights live
+
+```text
+~/.hawkeyexl-inference/models
+```
+
+**This library's own directory** — deliberately not node-llama-cpp's shared
+`~/.node-llama-cpp/models`.
+
+That shared default is used by node-llama-cpp's own CLI and anything else on the machine using it.
+Clearing it could destroy weights this library never downloaded. Owning a directory removes the
+hazard instead of defending against it.
+
+<Aside type="note" title="The cost of that choice">
+  Weights already sitting in the shared directory are downloaded again, once. That is the trade:
+  a duplicate download in exchange for a delete operation that cannot surprise you. The location is
+  **per-user, not per-project**, so one copy still serves every project on the machine.
+</Aside>
+
+## Relocate it
+
+Two ways, in precedence order:
+
+```ts
+// Per provider — wins.
+await makeProviderAsync({ provider: "llama-cpp", llamaCpp: { modelsDirectory: "/mnt/models" } });
+```
+
+```bash
+# Process-wide.
+export INFERENCE_MODELS_DIR=/mnt/models
+```
+
+`defaultLlamaModelsDirectory()` reports the effective value, which is the fastest way to answer
+"where did it actually put them."
+
+## Do it
+
+<Code code={manageModelFiles} lang="js" title="examples/manage-model-files.mjs" />
+
+```text
+default directory: C:\Users\you\.hawkeyexl-inference\models
+blob for gemma-4-e2b: gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+is gemma-4-e2b downloaded: true
+is gemma-4-e4b downloaded: false
+would remove: 3 files, 6656 bytes
+dryRun deleted nothing: true
+removed by alias: 1 remaining: 3
+removed the rest: 2
+survivors: [ 'notes.txt' ]
+unknown model rejected: true
+```
+
+## Preview first
+
+<Steps>
+
+1. **`dryRun`** reports `files` and `freedBytes` and deletes nothing.
+
+   ```ts
+   const { files, freedBytes } = await clearLlamaModels({ dryRun: true });
+   ```
+
+2. **Then clear**, once the report matches what you expected.
+
+   ```ts
+   await clearLlamaModels();                              // everything
+   await clearLlamaModels({ models: ["gemma-4-12b"] });   // one model, all its parts
+   await clearLlamaModels({ directory: "/mnt/models" });  // a non-default directory
+   ```
+
+</Steps>
+
+Lead with `dryRun` every time you point this at a directory you have not cleared before. It costs
+one line.
+
+## The guarantees
+
+You are being asked to run a delete over a directory holding gigabytes. These hold regardless of
+which directory you point at:
+
+- **Only `.gguf` and `.gguf.ipull` files are ever touched.** `notes.txt` in the sample survives.
+- **Top level only.** Subdirectories are never walked.
+- **Loaded weights are disposed first** — a memory-mapped model cannot be deleted on Windows.
+- **A file held open is skipped, not forced.**
+- **An unknown model name is rejected**, rather than silently matching nothing and reporting success.
+
+Interrupted `.ipull` partial downloads and every part of a split model go together, so you never end
+up with half a model on disk.
+
+<Aside type="tip" title="Why matching is by suffix">
+  Downloads are prefixed `hf_<user>_`, so `blobNameFor("gemma-4-e2b")` gives the blob name and the
+  on-disk file is `hf_unsloth_<that>`. Naming an alias removes exactly that model and all of its
+  parts. `isModelDownloaded(model, directory)` answers the question without a download.
+</Aside>
+
+## Free memory without deleting
+
+```ts
+await disposeLlamaModels();
+```
+
+Weights load **once per process** and are shared across every provider naming the same model. In a
+long-running process — a server, a watch mode — this releases them without touching disk.
+
+It is a free function rather than a method because the cache is process-wide, not per-provider:
+disposing one provider's model would break another provider that named the same weights.
+
+## Next
+
+- [Choosing a model](/inference/local/choosing-a-model/) — what to download in the first place
+- [Local models reference](/inference/reference/local-models/) — full signatures
+- [ADR 01003](https://github.com/hawkeyexl/inference/blob/main/adrs/01003-in-process-local-models-via-node-llama-cpp.md) — why the directory is owned rather than shared
+
+{/* test {"testId":"manage-model-files","description":"Model directory resolution, dryRun previewing, selective clearing, and the safety guarantees."} */}
+{/* step {"description":"An alias resolves to its on-disk blob name, and presence can be checked without downloading.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/manage-model-files.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"is gemma-4-e2b downloaded: true"}} */}
+{/* step {"description":"dryRun reports what would be freed and deletes nothing.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/manage-model-files.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"dryRun deleted nothing: true"}} */}
+{/* step {"description":"Non-model files survive a full clear — only .gguf and .gguf.ipull are touched.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/manage-model-files.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"survivors: [ 'notes.txt' ]"}} */}
+{/* step {"description":"An unknown model name is rejected rather than silently matching nothing.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/manage-model-files.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"unknown model rejected: true"}} */}
+{/* test end */}

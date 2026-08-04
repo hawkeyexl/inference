@@ -1,0 +1,86 @@
+# Build the documentation site and publish it to GitHub Pages.
+#
+# The site lives in docs/ as its own private npm workspace (docs/package.json), so it
+# has its own install step and never touches the published package's dependencies.
+#
+# Pages under docs/src/content/docs/** import their code samples from examples/*.mjs
+# with a `?raw` import, so nothing here needs the library built — but the build must
+# still succeed for the alias in docs/astro.config.mjs to resolve.
+#
+# Deploy runs on main only. Pull requests get the build as a check, without publishing.
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install docs dependencies
+        run: npm install
+        working-directory: docs
+
+      - name: Build site
+        run: npm run build
+        working-directory: docs
+
+      # Starlight does not fail a build on a dead internal link, so check them here.
+      # Every route the site links to under its own base must have been generated.
+      - name: Check internal links
+        run: node scripts/check-docs-links.mjs
+
+      # CUJ steps in docs/content-strategy/journeys/ name routes that are never links in
+      # built HTML, so the link check above cannot see them. Renaming a page would
+      # otherwise silently orphan every journey routing through it.
+      - name: Check content-strategy anchors and routes
+        run: node scripts/check-strategy-anchors.mjs
+
+      # Runs on pull requests too, deliberately. Uploading an artifact publishes
+      # nothing — only the `deploy` job below does — and exercising it here means a
+      # packaging failure (wrong path, size limit, permissions) surfaces on the PR
+      # instead of on the first push to main.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/dist
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

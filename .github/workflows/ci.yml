@@ -33,6 +33,12 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      # The Reference shelf replaces the old bare-name API list, so a new export must
+      # not silently arrive undocumented. Presence only — this is a "did you forget a
+      # page" gate, not a prose reviewer. Reads the built barrel, so it follows build.
+      - name: Docs export coverage
+        run: node scripts/check-docs-exports.mjs
+
       # The package is consumed by four sibling repos; a broken exports map
       # or a missing dist/ is a downstream outage, so gate on the tarball.
       - name: Package contents gate
@@ -43,6 +49,8 @@ jobs:
             const need = ["dist/index.js", "dist/index.d.ts", "package.json", "LICENSE"];
             const missing = need.filter(f => !files.includes(f));
             if (missing.length) throw new Error("tarball missing: " + missing.join(", "));
-            const leaked = files.filter(f => f.startsWith("src/") || f.startsWith("test/"));
+            const leaked = files.filter(f =>
+              f.startsWith("src/") || f.startsWith("test/") ||
+              f.startsWith("docs/") || f.startsWith("examples/"));
             if (leaked.length) throw new Error("tarball leaks sources: " + leaked.join(", "));
           '

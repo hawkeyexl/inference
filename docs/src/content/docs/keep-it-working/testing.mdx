@@ -1,0 +1,166 @@
+---
+title: Testing your integration
+description: Exercise your whole integration — including every failure path — with no network, no credential, and no GGUF weights.
+sidebar:
+  order: 1
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import testingSeams from '@examples/testing-seams.mjs?raw';
+
+Every boundary that would otherwise leave your process has an injection seam. Use them and your
+unit tests need no network, no API key, and no model weights.
+
+## One seam per boundary
+
+| Boundary | Seam | Injected via |
+|---|---|---|
+| The provider contract | `MockProvider` | constructed directly, or `ProviderSpec.mockResponses` |
+| A subprocess | `ExecFn` | `ProviderSpec.exec` |
+| Native local inference | `LlamaRuntime` | `ProviderSpec.llamaRuntime` or `llamaCpp.runtime` |
+
+Each is the narrowest thing that could be faked at that point. This library uses exactly these seams
+on itself — every unit test runs through one of them, and the only live tests are gated on
+environment variables and skipped by default.
+
+## All three
+
+<Code code={testingSeams} lang="js" title="examples/testing-seams.mjs" />
+
+```text
+1. verdict: pass zone: auto-pass
+   requests seen: 3
+   system prompt matched: true
+   temperature: 0
+   scripted failure recorded: 429 rate limited
+2. verdict: pass zone: auto-pass
+   argv: claude -p ...
+   prompt sent over stdin: true
+   prompt absent from argv: true
+3. model: gemma-4-e4b
+   verdict: pass zone: auto-pass
+   no weights downloaded, no GPU touched
+```
+
+## `MockProvider`
+
+```ts
+const provider = new MockProvider([mockVerdict("pass", 0.95)]);
+```
+
+Responses **cycle** when exhausted, so a one-element script answers every call. `mockVerdict(match,
+confidence, overrides?)` builds a `VERDICT_SCHEMA`-shaped payload; for other schemas pass
+`{ json: ... }` directly.
+
+### Assert on what you sent
+
+`provider.requests` records every `CompleteJSONRequest`, in order. This is how you test the part you
+actually own — that your prompt and schema were composed correctly.
+
+```ts
+expect(provider.requests).toHaveLength(3);
+expect(provider.requests[0].system).toBe(MY_SYSTEM_PROMPT);
+expect(provider.requests[0].schema).toBe(mySchema);
+expect(provider.requests[0].temperature).toBe(0);
+```
+
+<Aside type="tip">
+  Consumers own their prompts — this library ships none. So this assertion covers more of your
+  actual risk than any verdict assertion will.
+</Aside>
+
+### Script a failure
+
+```ts
+const flaky = new MockProvider([{ error: "429 rate limited" }]);
+```
+
+An `{ error }` entry rejects. This is how you prove the guarantees you are relying on:
+
+- an errored run forces `human-review`, however confident the others were;
+- `completeValidatedJSON` returns a run with `error` set rather than throwing or coercing;
+- your budget gate stops *before* the next call rather than after the overspend.
+
+None of that can be triggered against a live provider on demand.
+
+<Aside type="caution" title="Remember the retry">
+  Each run retries once by default. A single scripted error is absorbed by the retry. To produce a
+  genuinely errored run, script two consecutive failures.
+</Aside>
+
+## `ExecFn`
+
+For the `claude-cli` provider's subprocess:
+
+```ts
+const fakeExec = async (cmd, opts) => ({
+  code: 0,
+  stdout: JSON.stringify({ result: JSON.stringify(myVerdict) }),
+  stderr: "",
+  timedOut: false,
+});
+
+const provider = makeProvider({ provider: "claude-cli", exec: fakeExec });
+```
+
+The CLI wraps its answer in a `{ result: string }` envelope, so your fake must too.
+
+Assert on `cmd` for the argv, and on `opts.input` for the piped stdin. The sample above checks the
+property that matters most: **the prompt goes over stdin and never appears in argv**, because user
+content routinely exceeds the ~32K Windows command-line limit.
+
+## `LlamaRuntime`
+
+For in-process local inference, with no weights and no GPU:
+
+```ts
+const fakeRuntime = {
+  async getMemoryBudgetBytes() { return 16_000_000_000; },
+  async resolveModelFile(uri, directory) { return `${directory}/${uri.split("/").pop()}`; },
+  async loadModel() {
+    return {
+      async createSession() {
+        return {
+          async prompt() { return { text: JSON.stringify(myVerdict), usage: { inputTokens: 400, outputTokens: 60 } }; },
+          async dispose() {},
+        };
+      },
+      async dispose() {},
+    };
+  },
+};
+
+const provider = await makeProviderAsync({ provider: "llama-cpp", llamaRuntime: fakeRuntime });
+```
+
+`getMemoryBudgetBytes` is what `auto` probes, so returning a fixed number makes tier selection
+deterministic in tests.
+
+## Test isolation
+
+`resetTemperatureWarning()` clears the once-per-process warning that fires when `temperature > 0`.
+Call it in a `beforeEach` if you assert on warnings, or a test that runs second will not see one.
+
+## How these docs test themselves
+
+The same pattern, applied to documentation. Every runnable sample here lives in
+[`examples/`](https://github.com/hawkeyexl/inference/tree/main/examples), uses `MockProvider` or a
+fake runtime, and is:
+
+- **rendered onto the page from that file** with a `?raw` import, so a page cannot show code that
+  differs from the file, and
+- **executed on every pull request** by [Doc Detective](https://doc-detective.com), which runs the
+  file and asserts on its output.
+
+A broken example fails CI like any other test. See
+[ADR 01005](https://github.com/hawkeyexl/inference/blob/main/adrs/01005-docset-strategy-and-executable-examples.md).
+
+{/* test {"testId":"testing-seams","description":"All three injection seams: MockProvider, ExecFn, and LlamaRuntime."} */}
+{/* step {"description":"MockProvider records every request, so a consumer can assert on the prompt it composed (1/3)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"requests seen: 3"}} */}
+{/* step {"description":"MockProvider records every request, so a consumer can assert on the prompt it composed (2/3)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"system prompt matched: true"}} */}
+{/* step {"description":"MockProvider records every request, so a consumer can assert on the prompt it composed (3/3)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"scripted failure recorded: 429 rate limited"}} */}
+{/* step {"description":"An injected ExecFn drives claude-cli, and the prompt travels over stdin rather than argv (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"prompt sent over stdin: true"}} */}
+{/* step {"description":"An injected ExecFn drives claude-cli, and the prompt travels over stdin rather than argv (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"prompt absent from argv: true"}} */}
+{/* step {"description":"An injected LlamaRuntime drives the local path with no weights and no GPU (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"3. model: gemma-4-e4b"}} */}
+{/* step {"description":"An injected LlamaRuntime drives the local path with no weights and no GPU (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/testing-seams.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"no weights downloaded, no GPU touched"}} */}
+{/* test end */}

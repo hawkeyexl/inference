@@ -1,0 +1,135 @@
+---
+title: Structured extraction
+description: One schema-constrained call per subject, with a failure mode that cannot contaminate a deterministic tool's output.
+sidebar:
+  order: 1
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import extractOnce from '@examples/extract-once.mjs?raw';
+
+One call, one subject, one schema-valid object — or an honest failure.
+
+This is the completion layer on its own. **You do not need the judge layer for any of this**, and
+nothing on this page assumes it exists.
+
+Signatures are in the [completion reference](/inference/reference/completion/).
+
+## The guarantee to build on
+
+If you are adding a non-deterministic feature to a tool whose value proposition is determinism, this
+is the sentence that matters:
+
+> An errored run is recorded, never dropped and never coerced. `completeValidatedJSON` returns a run
+> with `error` set rather than throwing or inventing a result.
+
+There is no retry-until-success loop, and there never will be. A bad response cannot silently become
+data in your output.
+
+## Make the call
+
+<Code code={extractOnce} lang="js" title="examples/extract-once.mjs" />
+
+```text
+auth.md: { title: 'Authentication', type: 'how-to' }
+limits.md: { title: 'Rate limits', type: 'reference' }
+distinct schemas built: 1
+provider calls: 2
+```
+
+## Two schemas, one call
+
+The move that makes this layer worth using: ask the model for a **narrow** schema, validate against
+a **wider** one.
+
+```ts
+const run = await completeValidatedJSON({
+  provider,
+  system, user,
+  schema: proposalSchema(doc.missing),  // narrow: only the fields this document is missing
+  validate: validateProposal,           // wide: every field your tool accepts
+});
+```
+
+Why bother: sending the model only the fields you actually need keeps the prompt focused and the
+output smaller, while validating against your full configured set means a response is accepted as
+long as it is *legal*, not only if it is *exactly* what you asked for.
+
+`validate` takes a pre-compiled Ajv `ValidateFunction` — build it once with `validatorFor` at module
+scope.
+
+## The performance trap
+
+<Aside type="caution" title="Memoize your schema builder">
+  `validatorFor` caches compiled validators in a `WeakMap` keyed on **schema object identity**. A
+  builder that returns a fresh object every call therefore recompiles Ajv once per document.
+  Memoize on the field set, as the sample does.
+</Aside>
+
+```ts
+const schemaCache = new Map();
+function proposalSchema(missing) {
+  const key = [...missing].sort().join(",");
+  let schema = schemaCache.get(key);
+  if (schema === undefined) {
+    schema = { /* ... */ };
+    schemaCache.set(key, schema);
+  }
+  return schema;
+}
+```
+
+Identity keying is deliberate — a fresh Ajv instance is created per distinct schema object, so two
+equal-but-distinct schemas sharing an `$id` cannot collide in a shared registry. The cost is that
+you must hand back the same object for the same logical schema.
+
+## Handling the outcome
+
+```ts
+if (run.error !== undefined) {
+  warn(`${doc.path}: skipped — ${run.error}`);
+  continue;             // the deterministic path is untouched
+}
+applyProposal(doc, run.result);
+```
+
+Check `run.error`, not a `try`/`catch`. A model failure never throws.
+
+<Aside type="note" title="Operational failures do throw">
+  A missing API key or an unknown provider name is an `InferenceError`, thrown at construction.
+  Catch that at your boundary and translate it into your own error type — see
+  [budgets and errors](/inference/extract/budgets-and-errors/).
+</Aside>
+
+## Options worth knowing
+
+| Option | Default | Notes |
+|---|---|---|
+| `temperature` | `0` | Extraction wants determinism. Leave it. |
+| `attempts` | `2` | One call plus one retry. Raising it buys little — a schema the model cannot satisfy will not become satisfiable on the fourth try. |
+| `validate` | derived from `schema` | Supply a pre-compiled validator to widen what you accept. |
+
+## What comes back
+
+| Field | Notes |
+|---|---|
+| `result` | Absent when the run errored |
+| `error` | The validation failure or the provider error |
+| `provider`, `model` | Identity — feeds cache keys and pricing |
+| `cached` | `true` only when replayed from a cache you supplied |
+| `usage` | Absent when the provider does not report tokens |
+| `durationMs` | Wall clock |
+
+## Next
+
+- Stay inside a cost ceiling and fail soft → [Budgets and errors](/inference/extract/budgets-and-errors/)
+- Shell out cross-platform → [The subprocess seam](/inference/extract/subprocess-seam/)
+- Cache repeat calls → [Caching](/inference/judge/caching/) (the mechanics are layer-independent)
+- Test it all offline → [Testing your integration](/inference/keep-it-working/testing/)
+
+{/* test {"testId":"extract-once","description":"Single-shot extraction: narrow request schema, wide validation schema, memoized builder."} */}
+{/* step {"description":"Each document gets a validated proposal back (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/extract-once.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"auth.md: { title: 'Authentication', type: 'how-to' }"}} */}
+{/* step {"description":"Each document gets a validated proposal back (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/extract-once.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"limits.md: { title: 'Rate limits', type: 'reference' }"}} */}
+{/* step {"description":"Memoizing on the field set builds one schema object for two documents, so Ajv compiles once (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/extract-once.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"distinct schemas built: 1"}} */}
+{/* step {"description":"Memoizing on the field set builds one schema object for two documents, so Ajv compiles once (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/extract-once.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"provider calls: 2"}} */}
+{/* test end */}

@@ -1,0 +1,155 @@
+---
+title: Judge reference
+description: judge, runEnsemble, EnsembleOptions, consensus math, zone thresholds, and the canonical verdict schema.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The ensemble, the consensus math, and the zone routing.
+
+For using them, see [judge and consensus](/inference/judge/).
+
+## `judge`
+
+```ts
+function judge(options: EnsembleOptions & { zones?: ZoneThresholds }): Promise<ConsensusResult>;
+```
+
+`runEnsemble` + `computeConsensus` + `zoneFor` in one call.
+
+## `runEnsemble`
+
+```ts
+function runEnsemble(options: EnsembleOptions): Promise<JudgeRun[]>;
+```
+
+N independent runs, **sequentially**. Concurrency belongs one level up, across subjects.
+
+## `EnsembleOptions`
+
+```ts
+interface EnsembleOptions {
+  provider: InferenceProvider;
+  system: string;
+  user: string;
+  runs?: number;                     // default 3
+  temperature?: number;              // default 0; > 0 warns once per process
+  schema?: Record<string, unknown>;  // default VERDICT_SCHEMA
+  cache?: JsonCache<JudgeRun[]>;
+  cacheKey?: string;
+  label?: string;                    // default "inference" — prefixes cache warnings
+}
+```
+
+<Aside type="tip" title="schema is the per-consumer override">
+  Supply your own verdict schema to word its field descriptions for your domain. Descriptions are
+  prompt surface and measurably steer the model. See
+  [custom verdict schema](/inference/judge/verdict-schema/).
+</Aside>
+
+The cache is consulted only when **both** `cache` and `cacheKey` are given. A hit that is not an
+array is treated as a miss. Replayed runs are re-flagged `cached: true`. The validator is compiled
+once for the whole ensemble.
+
+## `JudgeRun` and `JudgeVerdict`
+
+```ts
+interface JudgeRun {
+  verdict?: JudgeVerdict;  // absent when the run errored
+  error?: string;
+  provider: string;
+  model: string;
+  cached: boolean;
+  usage?: TokenUsage;
+  durationMs: number;
+}
+
+interface JudgeVerdict {
+  claim: string;
+  observed: string;
+  match: "pass" | "fail" | "partial";
+  confidence: number;   // 0–1
+  reasoning: string;
+}
+```
+
+<Aside type="danger" title="JudgeRun is a file format">
+  It is persisted to consumers' on-disk caches. Renaming or removing a field invalidates every
+  cached ensemble in every consuming repository. Changes carry a `BREAKING CHANGE:` footer. See
+  [upgrading](/inference/keep-it-working/upgrading/).
+</Aside>
+
+`JudgeRun` uses `verdict` where `InferenceRun` uses `result`; `runEnsemble` maps between them at the
+boundary.
+
+## `computeConsensus`
+
+```ts
+function computeConsensus(runs: JudgeRun[]): Omit<ConsensusResult, "zone">;
+
+interface ConsensusResult {
+  runs: JudgeRun[];
+  votes: { pass: number; fail: number; partial: number; error: number };
+  verdict: "pass" | "fail";
+  agreement: number;       // 0–1
+  meanConfidence: number;
+  zone: "auto-pass" | "auto-fail" | "human-review";
+}
+```
+
+The exact rules:
+
+- `partial` counts toward **fail** for `verdict`, but stays visible in `votes`.
+- `verdict` is `pass` only when `pass > fail + partial`. **A tie is not a pass.**
+- Errored runs increment `votes.error` and are excluded from `agreement` and `meanConfidence`.
+- `agreement = max(pass, fail + partial) / graded`, where `graded` counts non-errored runs. All
+  errored yields `0`.
+
+## `zoneFor`
+
+```ts
+function zoneFor(
+  consensus: Omit<ConsensusResult, "zone">,
+  thresholds?: ZoneThresholds,
+): Zone;
+
+interface ZoneThresholds { autoPass: number; autoFail: number }
+const DEFAULT_ZONES: ZoneThresholds;  // { autoPass: 0.8, autoFail: 0.8 }
+```
+
+| Zone | Requires |
+|---|---|
+| `auto-pass` | `pass > 0`, `fail === 0`, `partial === 0`, `error === 0`, `meanConfidence >= autoPass` |
+| `auto-fail` | `pass === 0`, `error === 0`, `fail + partial > 0`, `meanConfidence >= autoFail` |
+| `human-review` | everything else |
+
+**Any errored run forces `human-review`.** Thresholds cannot override the vote rules.
+
+## `VERDICT_SCHEMA`
+
+```ts
+const VERDICT_SCHEMA: Record<string, unknown>;
+```
+
+`$id: "inference:verdict:0.1"`. All five `JudgeVerdict` fields required,
+`additionalProperties: false`, `confidence` bounded 0–1.
+
+Start from it when writing your own — change `$id`, `title`, and the descriptions; leave the
+structure alone. An override that does not produce `JudgeVerdict`-shaped objects fails at **runtime,
+not compile time**.
+
+## `resetTemperatureWarning`
+
+```ts
+function resetTemperatureWarning(): void;
+```
+
+Clears the once-per-process `temperature > 0` warning. A test seam — call it in a `beforeEach` if
+you assert on warnings.
+
+## Source of truth
+
+`src/judge/ensemble.ts`, `consensus.ts`, `zones.ts`, `types.ts`, and `verdict-schema.json`. Every
+edge case above is pinned in `test/unit/judge.test.ts`.

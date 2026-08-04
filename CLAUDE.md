@@ -38,8 +38,36 @@ durable — a gotcha, a decision, a convention — record it **in the repo, in t
 |---|---|
 | Behavior decisions, contracts, trade-offs | [adrs/](adrs) (MADR) |
 | Repo-wide agent workflow rules | This file |
-| User-facing API, providers, options | [README.md](README.md) |
+| User-facing API, providers, options | [docs/](docs) — the site; [README.md](README.md) routes into it |
+| Who the docs serve and why a page exists | [docs/content-strategy/](docs/content-strategy) |
 | Ephemeral working notes | `.tmp/` (gitignored) — never committed |
+
+## Documentation work (required before writing any user-facing page)
+
+Docs live in [docs/](docs) as a private Astro/Starlight workspace. Read on demand — do not assume:
+
+| Path | What it holds |
+|---|---|
+| [docs/content-strategy/](docs/content-strategy) | Audiences, personas, CUJs, and the IA. **Start here.** |
+| `docs/content-strategy/journeys/` | 14 CUJs. Every page must name the one it serves. |
+| `docs/content-strategy/information_architecture/` | The page-by-page content set and the source-of-truth map. |
+| `docs/src/content/docs/**` | The published pages. |
+| [examples/](examples) | Every runnable sample. Never inline one into a page. |
+
+Four personas, referenced by first name throughout: **Priya** (eval-tool author, lead), **Marco**
+(CLI feature integrator), **Rin** (adopting maintainer), **Owen** (offline/cost-zero operator).
+CUJ codes are `R1`–`R2`, `P1`–`P4`, `M1`–`M3`, `O1`–`O3`, `X1`, `U1`; `P1` is the anchor.
+
+1. Identify the persona, then the CUJ. A page that cannot name its CUJ does not belong in the nav.
+2. Structure around the journey, **not** document type. This IA is deliberately not Diátaxis.
+3. Put signatures and option tables in `reference/`; journey pages link into them.
+4. Every page needs `title` and `description` frontmatter.
+5. Every runnable sample is a file in `examples/`, rendered via a `?raw` import and executed in CI
+   by Doc Detective. Adding one means adding a `runCode` step whose `code` launches the file and
+   whose `stdio` carries one assertion — see
+   [ADR 01005](adrs/01005-docset-strategy-and-executable-examples.md) for why a sample cannot be
+   inlined into the step.
+6. Adding a page means recording it in `information_architecture/proposed-ia.md` in the same change.
 
 ## Invariants of this codebase (required reading)
 
@@ -96,6 +124,22 @@ npm run typecheck
 npm run build
 npm test
 ```
+
+When the change touches `docs/**` or `examples/**`, also:
+
+```bash
+cd docs && npm install && npm run build && cd .. && node scripts/check-docs-links.mjs && npx doc-detective
+```
+
+`npm run build` at the root must come first — `examples/*.mjs` import the package by its published
+name via Node's package self-reference, which resolves to `dist/`. Run `doc-detective` from the
+repository root: its `runCode` launchers use paths relative to the working directory, and
+`workingDirectory` is deliberately left unset because a relative value fails on Windows.
+
+**Use a current `doc-detective`.** `npx doc-detective` resolves the latest release; do not run a
+vendored copy found elsewhere on the machine. An early `4.x` beta silently dropped `stdio` from
+`runCode` steps, which makes every assertion here pass unconditionally — a false green that looks
+exactly like a healthy run. ADR 01005 records the episode.
 
 ## Real-machine verification (required)
 

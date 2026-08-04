@@ -16,3 +16,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01002](01002-best-of-merge-of-three-forks.md) | Best-of merge of three drifted forks |
 | [01003](01003-in-process-local-models-via-node-llama-cpp.md) | In-process local models via node-llama-cpp, behind an async selector |
 | [01004](01004-provider-auto-detection.md) | Detect an available provider when none is specified, ending at the local model |
+| [01005](01005-docset-strategy-and-executable-examples.md) | A CUJ-first documentation set, with samples that CI executes |

@@ -1,0 +1,128 @@
+---
+title: Get started
+description: Install the package and make one schema-constrained call — with no API key, no account, and no network.
+sidebar:
+  order: 1
+---
+
+import { Aside, Code, Steps } from '@astrojs/starlight/components';
+import firstCall from '@examples/first-call.mjs?raw';
+
+Install, then make a real validated call — happy path and failure branch — without an API key.
+
+By the end you will know the shape of the contract, what happens when a model returns something
+unusable, and which of the two layers you actually need.
+
+## Requirements
+
+- **Node 24 or later.**
+- **ESM only.** There is no CommonJS build; `require()` will not work.
+
+Both are hard filters. If either is a problem, stop here rather than after writing code.
+
+## Install
+
+```bash
+npm install @hawkeyexl/inference
+```
+
+Three runtime dependencies come with it. Local models need [one more](/inference/local/), and it is
+an optional peer dependency you install only if you want it.
+
+## Make a call
+
+You do not need a provider account to start. `MockProvider` is exported for exactly this — it
+satisfies the same contract a real provider does, returns responses you script, and never touches
+the network.
+
+<Code code={firstCall} lang="js" title="examples/first-call.mjs" />
+
+Run it:
+
+```bash
+node examples/first-call.mjs
+```
+
+```text
+result: { summary: 'Covers authentication and token refresh.' }
+usage: { inputTokens: 500, outputTokens: 100 }
+identity: mock mock-model cached: false
+failed.result: undefined
+failed.error: Response failed schema validation:  must have required property 'summary';  must NOT have additional properties
+```
+
+<Aside type="tip" title="This sample is executed in CI">
+  Every runnable sample in these docs lives in [`examples/`](https://github.com/hawkeyexl/inference/tree/main/examples),
+  is rendered onto the page from that file, and is run on every pull request. A page cannot drift
+  from the code it shows.
+</Aside>
+
+## What just happened
+
+<Steps>
+
+1. **You described the output with a JSON Schema.** Not a prompt instruction — an actual schema.
+   The provider uses whatever native mechanism it has to constrain the model to it.
+
+2. **The response was validated with Ajv.** If it fails, the call is retried once. `attempts`
+   defaults to `2` — one call plus one retry.
+
+3. **A failure was recorded, not thrown.** The second call returned an `InferenceRun` with `error`
+   set and `result` absent.
+
+</Steps>
+
+That third point is the one to internalise:
+
+> An errored run is recorded, never dropped and never coerced.
+
+`completeValidatedJSON` does not throw on a model failure, and it never invents a result to keep
+going. Your code checks `run.error` and decides. This is deliberate, and everything downstream —
+including the judge layer's refusal to auto-pass an ensemble containing an error — is built on it.
+
+<Aside type="caution" title="Operational failures are different">
+  A *model* failure lands on `run.error`. An *operational* failure — a missing API key, an unknown
+  provider name — is thrown as `InferenceError`. Two classes, two handling paths. See
+  [choosing a provider](/inference/get-started/choose-a-provider/).
+</Aside>
+
+## What comes back
+
+`InferenceRun` carries the result and everything you need to account for the call:
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | `T \| undefined` | Absent when the run errored |
+| `error` | `string \| undefined` | Present when the run errored |
+| `provider` | `string` | Stable provider id — feeds cache keys |
+| `model` | `string` | Feeds cache keys and price lookups |
+| `cached` | `boolean` | `true` when replayed from cache; costs nothing |
+| `usage` | `TokenUsage \| undefined` | Absent when the provider does not report it |
+| `durationMs` | `number` | Wall-clock for the run |
+
+Full signatures are in the [completion reference](/inference/reference/completion/).
+
+## Which layer do you need?
+
+Everything exports from the package root, but the two layers are independent.
+
+| You want to… | Use | Start at |
+|---|---|---|
+| Get one structured object per subject | **Completion** only | [Structured extraction](/inference/extract/) |
+| Turn N model opinions into a defensible decision | **Judge**, built on completion | [Judge & consensus](/inference/judge/) |
+| Run with no API key at all | Either, with a local provider | [Run models locally](/inference/local/) |
+
+## Next
+
+Point the same call at a real model: [choose a provider](/inference/get-started/choose-a-provider/).
+
+{/* Doc Detective inline tests. Each step is a one-line launcher that runs a real file from
+    examples/; the step's `stdio` field carries the assertion. A sample cannot be inlined —
+    runCode writes the snippet to os.tmpdir(), so a bare specifier cannot resolve from there.
+    See adrs/01005. Run from the repo root, after `npm run build`: `npx doc-detective`. */}
+{/* test {"testId":"get-started","description":"The install-and-first-call flow, run against the built package via examples/first-call.mjs."} */}
+{/* step {"description":"Node 24+ prerequisite is stated on the page and satisfied by the runner.","runCode":{"language":"javascript","code":"const a=require('node:assert');a.ok(Number(process.versions.node.split('.')[0])>=24,'Node 24+ required, got '+process.versions.node);"}} */}
+{/* step {"description":"The first call returns a validated result matching the output shown on the page.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"result: { summary: 'Covers authentication and token refresh.' }"}} */}
+{/* step {"description":"A schema-invalid response is recorded as an error rather than thrown or coerced (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"failed.result: undefined"}} */}
+{/* step {"description":"A schema-invalid response is recorded as an error rather than thrown or coerced (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/first-call.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"failed.error: Response failed schema validation"}} */}
+{/* test end */}

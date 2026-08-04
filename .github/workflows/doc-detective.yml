@@ -1,0 +1,61 @@
+# Execute the code samples shown in the documentation.
+#
+# Pages under docs/src/content/docs/** carry inline Doc Detective tests. Each `runCode`
+# step is a one-line launcher that runs a real file from examples/, and the step's own
+# `stdio` field carries the assertion. See adrs/01005.
+#
+# A sample cannot be inlined into the step: runCode writes the snippet to os.tmpdir(),
+# so module resolution happens from there and a bare specifier cannot resolve — by
+# `import` (ERR_MODULE_NOT_FOUND) or by `require` (MODULE_NOT_FOUND).
+#
+# `npm run build` must precede the run: examples/*.mjs import the package by its real
+# published name via Node's package self-reference, which resolves to dist/index.js.
+#
+# Doc Detective is invoked from the repository root and `workingDirectory` is left
+# unset — a relative value fails on Windows with ENOENT, so the launchers' paths
+# resolve against this process's cwd instead.
+#
+# Fork pull requests are refused: these steps execute code from the diff.
+
+name: Doc Detective
+
+on:
+  pull_request:
+    paths:
+      - "docs/src/content/docs/**"
+      - "examples/**"
+      - "src/**"
+      - ".doc-detective.json"
+      - ".github/workflows/doc-detective.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-doc-tests:
+    # Inline tests execute code, so never run them for a fork's pull request.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      # Same rationale as ci.yml: npm install, and skip the node-llama-cpp binary.
+      # Every sample drives MockProvider or an injected LlamaRuntime, so nothing here
+      # loads a native binding or downloads weights.
+      - run: npm install
+        env:
+          NODE_LLAMA_CPP_SKIP_DOWNLOAD: "true"
+          NODE_LLAMA_CPP_POSTINSTALL: skip
+
+      # examples/*.mjs resolve "@hawkeyexl/inference" to dist/index.js by self-reference.
+      - run: npm run build
+
+      - name: Run documentation tests
+        uses: doc-detective/github-action@a2a4f5ceb1abfa55d567e4f6766223082ece2c18 # v1

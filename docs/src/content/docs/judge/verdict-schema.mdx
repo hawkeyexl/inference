@@ -1,0 +1,124 @@
+---
+title: Custom verdict schema
+description: Replace the built-in verdict schema with one worded for your own domain, without losing the shape the consensus math depends on.
+sidebar:
+  order: 4
+---
+
+import { Aside, Code, Steps } from '@astrojs/starlight/components';
+import customVerdictSchema from '@examples/custom-verdict-schema.mjs?raw';
+
+Wording the verdict in your own domain's language, and guarding the one contract the
+library cannot check for you.
+
+Running the ensemble is [judge and consensus](/inference/judge/). The canonical schema is in the
+[judge reference](/inference/reference/judge/#verdict_schema).
+
+## Why the seam exists
+
+`EnsembleOptions.schema` replaces the built-in `VERDICT_SCHEMA` for an ensemble. The reason is not
+structural flexibility — it is this:
+
+> **Field descriptions are prompt surface.** They reach the model and measurably steer it.
+
+A `claim` field described in terms of documentation pages produces different verdicts than one
+described in terms of agent traces. Every production consumer of this package overrides the schema,
+and every one of them changes only `$id`, `title`, and the **descriptions**. None change the
+structure.
+
+That is the pattern to copy.
+
+## Do it
+
+<Code code={customVerdictSchema} lang="js" title="examples/custom-verdict-schema.mjs" />
+
+```text
+canonical $id: inference:verdict:0.1
+override $id:  my-tool:trace-verdict:1
+structure unchanged: true
+verdict: pass zone: auto-pass
+schema sent was the override: true
+run validated: true
+but confidence is: undefined
+guard this with a round-trip test in your own suite
+```
+
+<Steps>
+
+1. **Clone `VERDICT_SCHEMA`.** It is exported. Starting from it is what keeps the structure right.
+
+2. **Change `$id` and `title`.** Give it your own namespace so a cached entry written against your
+   schema is never confused with one written against the canonical shape.
+
+3. **Rewrite the descriptions** in your domain's vocabulary. This is the part that changes results.
+
+4. **Pass it as `schema`** to `judge` or `runEnsemble`. The validator is compiled once for the whole
+   ensemble.
+
+</Steps>
+
+## The hole you have to guard
+
+<Aside type="danger" title="Shape is enforced at runtime, not compile time">
+  The library validates responses against whatever schema you hand it. It does **not** check that
+  your schema produces `JudgeVerdict`-shaped objects.
+</Aside>
+
+The last three lines of the sample output are the failure, reproduced deliberately: a schema with
+`confidence` removed yields runs that **validate cleanly** and then carry `undefined` where the
+consensus math expects a number. Nothing throws. `meanConfidence` quietly becomes meaningless, and
+zone routing with it.
+
+TypeScript cannot catch this — `schema` is a `Record<string, unknown>`, so there is no type
+relationship between it and `JudgeVerdict`.
+
+Guard it yourself, in three lines, in your own test suite:
+
+```ts
+import { MockProvider, runEnsemble } from "@hawkeyexl/inference";
+import myVerdictSchema from "./my-verdict-schema.json" with { type: "json" };
+
+it("produces JudgeVerdict-shaped verdicts", async () => {
+  const provider = new MockProvider([{ json: aRepresentativeVerdict }]);
+  const [run] = await runEnsemble({ provider, system: "s", user: "u", runs: 1, schema: myVerdictSchema });
+  expect(typeof run.verdict?.confidence).toBe("number");
+  expect(["pass", "fail", "partial"]).toContain(run.verdict?.match);
+});
+```
+
+## What must not change
+
+| Field | Why it is load-bearing |
+|---|---|
+| `match` | `computeConsensus` counts `pass`/`fail`/`partial`. An unknown value is not counted. |
+| `confidence` | Bounded 0–1. `meanConfidence` and both zone thresholds read it. |
+| `claim`, `observed`, `reasoning` | Not read by the math, but they are what a human reviewing a `human-review` result actually reads. Dropping them makes the review zone useless. |
+
+Keep `additionalProperties: false`. It is what stops a model from padding the object with fields your
+downstream code will not expect.
+
+## Under a local model
+
+Grammar-constrained decoding changes four things, and a custom schema is where they bite:
+
+- `required` is ignored — every key in `properties` is emitted regardless.
+- `additionalProperties` defaults to `false`.
+- Numeric bounds are not enforced by the grammar; an out-of-range `confidence` comes back
+  well-formed and is caught by Ajv and the retry.
+- Descriptions are invisible to the grammar, so the provider restates the schema in the system
+  prompt. Your wording still works — it arrives by a different route.
+
+None of these affect the canonical schema, which requires all its fields. They matter as soon as
+yours has optional ones. See [choosing a model](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+
+## Next
+
+- [Caching](/inference/judge/caching/) — put a schema version in your cache key
+- [Upgrading](/inference/keep-it-working/upgrading/) — what a schema change does to entries you already hold
+- [ADR 01001](https://github.com/hawkeyexl/inference/blob/main/adrs/01001-single-entry-point-and-canonical-verdict-schema.md) — the full reasoning
+
+{/* test {"testId":"custom-verdict-schema","description":"The verdict-schema override seam, and the runtime-only shape contract."} */}
+{/* step {"description":"An override changes $id and descriptions while leaving the structure identical.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/custom-verdict-schema.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"structure unchanged: true"}} */}
+{/* step {"description":"The provider receives the override schema, not the built-in one.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/custom-verdict-schema.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"schema sent was the override: true"}} */}
+{/* step {"description":"A schema missing confidence validates cleanly and yields undefined — the runtime-only hole.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/custom-verdict-schema.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"but confidence is: undefined"}} */}
+{/* test end */}

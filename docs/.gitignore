@@ -1,0 +1,4 @@
+# Astro / Starlight build output and caches for the docs workspace.
+node_modules/
+dist/
+.astro/

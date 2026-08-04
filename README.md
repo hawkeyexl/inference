@@ -9,38 +9,45 @@ Extracted from three projects that had each grown their own copy —
 [agentevals](https://github.com/hawkeyexl/agentevals) — so a provider fix lands once instead of
 three times.
 
+**📖 [Documentation](https://hawkeyexl.github.io/inference/)**
+
 ## Install
 
 ```bash
 npm install @hawkeyexl/inference
 ```
 
-Requires Node 24+. ESM only.
+Requires Node 24+. ESM only. Three runtime dependencies, plus one optional peer dependency for
+local models.
 
 ## What it does
 
-Every consumer of this library wants the same narrow thing: **send a system prompt, a user prompt,
-and a JSON Schema; get back JSON that validates against that schema, or a recorded error.** No
-streaming, no multi-turn, no tool loops.
+Every consumer wants the same narrow thing: **send a system prompt, a user prompt, and a JSON
+Schema; get back JSON that validates against that schema, or a recorded error.**
+
+```ts
+(system, user, schema, temperature) -> JSON
+```
+
+**No streaming, no multi-turn, no tool loops.** If you need a conversation, this is the wrong
+package. Widening the provider contract requires an [ADR](adrs).
 
 Two layers, one entry point:
 
 - **Completion** — the provider contract, five providers, a content-addressed cache, a price table,
-  and a validate-and-retry wrapper. This is all dockg-style structured extraction needs.
+  and a validate-and-retry wrapper. All that structured extraction needs.
 - **Judge** — the canonical verdict schema, an N-run ensemble, consensus math, and confidence-zone
   routing. Built on the completion layer; ignore it if you do not need it.
 
 ## Quick start
 
-### Schema-constrained completion
+No API key required — `MockProvider` is exported for exactly this.
 
 ```ts
-import { completeValidatedJSON, makeProvider } from "@hawkeyexl/inference";
+import { MockProvider, completeValidatedJSON } from "@hawkeyexl/inference";
 
-const provider = makeProvider({ provider: "anthropic", model: "claude-sonnet-4-5" });
-
-const run = await completeValidatedJSON<{ summary: string }>({
-  provider,
+const run = await completeValidatedJSON({
+  provider: new MockProvider([{ json: { summary: "Covers authentication." } }]),
   system: "You summarize documentation pages.",
   user: pageBody,
   schema: {
@@ -55,311 +62,43 @@ if (run.error) console.error(run.error);
 else console.log(run.result.summary, run.usage);
 ```
 
-`completeValidatedJSON` never throws on a model failure and never coerces a bad response. It
-retries once, then returns a run with `error` set and `result` absent.
+`completeValidatedJSON` never throws on a model failure and never coerces a bad response. It retries
+once, then returns a run with `error` set and `result` absent.
 
-### LLM-as-judge
-
-```ts
-import { judge, makeProvider } from "@hawkeyexl/inference";
-
-const consensus = await judge({
-  provider: makeProvider({ provider: "claude-cli" }),
-  system: "You evaluate whether a page satisfies an assertion.",
-  user: "# Assertion\nThe page documents authentication.\n\n# Page\n...",
-  runs: 3,
-});
-
-consensus.verdict;   // "pass" | "fail"   — partial counts as fail
-consensus.zone;      // "auto-pass" | "auto-fail" | "human-review"
-consensus.agreement; // 0..1 across non-errored runs
-```
-
-Only a **unanimous, high-confidence** ensemble auto-resolves. Anything split, low-confidence, or
-containing an errored run routes to `human-review` — an errored run can never produce a silent pass.
-
-### Caching
-
-Key composition stays with you, because each consumer has a different notion of what should
-invalidate an entry (page body, prompt version, ensemble size, requested fields):
+Point it at a real model by swapping the provider — or omit `provider` entirely and let the library
+detect one this machine can use, ending at the free local model:
 
 ```ts
-import { JsonCache, buildCacheKey, runEnsemble, sha256 } from "@hawkeyexl/inference";
-
-const cache = new JsonCache(".mytool/cache", true, "mytool");
-const cacheKey = buildCacheKey([
-  provider.provider(),
-  provider.modelName(),
-  `v${MY_PROMPT_VERSION}`,
-  `r${runs}`,
-  sha256(pageBody),         // pre-hash long parts
-]);
-
-const judgeRuns = await runEnsemble({ provider, system, user, runs, cache, cacheKey });
+const provider = await makeProviderAsync({});
 ```
-
-Cached runs come back flagged `cached: true`, so `costOfRuns` correctly charges nothing for a
-replay. Cache write failures warn once and continue — a read-only workspace must not abort a run
-whose inference already succeeded and was already paid for.
-
-### Cost
-
-```ts
-import { costOfRuns, pricingFor } from "@hawkeyexl/inference";
-
-const pricing = pricingFor(provider.modelName(), configOverride);
-const usd = costOfRuns(judgeRuns, pricing);
-```
-
-An unknown model returns `undefined` pricing and costs `0` — **unknown, never a guess**. A
-fabricated price is worse than an absent one when a budget gate depends on it.
 
 ## Providers
 
-Constructed through `makeProvider(spec)`. The spec is a flat, library-owned shape — map your own
-config into it rather than passing your config object (see
-[ADR 01000](adrs/01000-library-owned-provider-spec.md)).
-
-| `provider` | Structured output via | Key | Reports usage |
-|---|---|---|---|
+| `provider` | Structured output via | Credential | Reports usage |
+|---|---|---|:---:|
 | `anthropic` | forced tool call | `ANTHROPIC_API_KEY` | yes |
 | `openai` | strict `json_schema`, falls back to `json_object` | `OPENAI_API_KEY` | yes |
-| `claude-cli` | schema in the prompt, `--output-format json` | local `claude` auth | no |
+| `claude-cli` | schema in the prompt, `--output-format json` | local `claude` auth | **no** |
 | `llama-cpp` | GBNF grammar compiled from the schema | — (runs locally) | yes |
 | `mock` | scripted responses | — | synthetic |
 
-```ts
-interface ProviderSpec {
-  // omitted or "auto" -> detect one (see below)
-  provider?: "anthropic" | "openai" | "claude-cli" | "llama-cpp" | "mock" | "auto";
-  model?: string | null;      // null/undefined -> per-provider default
-  apiKeyEnv?: string | null;  // default ANTHROPIC_API_KEY / OPENAI_API_KEY
-  baseUrl?: string;           // openai only, default https://api.openai.com/v1
-  command?: string;           // claude-cli only, default "claude"
-  timeoutMs?: number;         // claude-cli only, default 180000
-  pricing?: Pricing;          // override the built-in table
-  anthropic?: AnthropicProviderOptions;   // e.g. toolName, maxTokens
-  openai?: OpenAICompatProviderOptions;   // e.g. schemaName
-  llamaCpp?: LlamaCppProviderOptions;     // e.g. thoughtTokens, maxTokens
-  exec?: ExecFn;              // test seam for claude-cli
-  llamaRuntime?: LlamaRuntime;// test seam for llama-cpp
-  mockResponses?: MockResponse[];
-}
-```
+Usage reporting is the column that decides whether cost accounting works: a provider that reports no
+tokens makes a budget gate inert. See
+[Choose a provider](https://hawkeyexl.github.io/inference/get-started/choose-a-provider/).
 
-`resolveProviderIdentity(spec)` returns `{ provider, model }` **without constructing anything** —
-cache keys and pricing need the identity, but a fully-cached run should not require an API key.
+## Documentation
 
-### Auto-detection
-
-Omit `provider` (or pass `"auto"`) and the library picks the highest-priority one this machine can
-actually use, ending at the local model — so it works with no API keys at all:
-
-```ts
-const provider = await makeProviderAsync({});          // detects
-const options  = await availableProviders();           // ["claude-cli", "llama-cpp"]
-```
-
-| Order | Available when |
+| Track | What it covers |
 |---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` is non-empty |
-| `openai` | `OPENAI_API_KEY` is non-empty, **or** `baseUrl` is set (keyless local server) |
-| `claude-cli` | `claude --version` runs and exits 0 |
-| `llama-cpp` | `node-llama-cpp` is installed |
+| [Get started](https://hawkeyexl.github.io/inference/get-started/) | Install, one validated call with no key, choosing a provider |
+| [Judge & consensus](https://hawkeyexl.github.io/inference/judge/) | Ensembles, consensus math, confidence zones, caching, budgets |
+| [Structured extraction](https://hawkeyexl.github.io/inference/extract/) | One schema-constrained call, honest failures, the subprocess seam |
+| [Run models locally](https://hawkeyexl.github.io/inference/local/) | GGUF weights in-process, model selection, managing weights on disk |
+| [Keep it working](https://hawkeyexl.github.io/inference/keep-it-working/testing/) | Testing without a network, upgrading without losing a cache |
+| [Reference](https://hawkeyexl.github.io/inference/reference/providers/) | Full signatures for every export |
 
-`mock` is never auto-selected — it answers `{ json: {} }` unless scripted, which would pass as a
-real result. Ask for it by name.
-
-Probing stops at the first hit, because the probes get much more expensive down the list: reading an
-environment variable is microseconds, spawning the CLI ~150 ms, and loading the llama binding
-~850 ms — and that last one initialises the llama backend. `availableProviders()` necessarily runs
-them all, so prefer `makeProviderAsync` on a hot path.
-
-Detection reads the **default** key variables and ignores a custom `apiKeyEnv`: one field is shared
-by both API providers, so a custom name cannot say which provider it belongs to. Name the
-`provider` explicitly when you use one. (`apiKeyEnv` still applies in full once a provider is named.)
-
-Detection is **async**, because probing the CLI and the local runtime is. The synchronous
-`makeProvider`/`resolveProviderIdentity` therefore throw when `provider` is missing or `"auto"`,
-rather than emitting an identity that isn't concrete — the same rule the `auto` *model* selector
-follows, and for the same cache-key reason.
-
-Two one-time warnings: which provider was auto-selected (an env var moving between runs otherwise
-silently changes what an eval measured), and — if `llama-cpp` wins and its weights are absent — the
-model and download size, before the download starts.
-
-When nothing is available the error names every provider and why each failed, e.g. `anthropic —
-ANTHROPIC_API_KEY is not set`.
-
-Notes on the non-obvious bits:
-
-- **`openai`** targets any `/chat/completions` server (OpenAI, Azure, Ollama, Groq, Together). It
-  prefers strict `json_schema`, and `toStrictSchema` rewrites your schema into the strict subset
-  (every property in `required`, optionality as a `null` type union, unsupported keywords dropped);
-  nulls are stripped back out of the response. If the server rejects `response_format`, it
-  permanently falls back to `json_object` with the schema in the prompt. Keyless local servers are
-  allowed — only `api.openai.com` requires a key.
-- **`claude-cli`** uses your local Claude CLI auth, so no API key. The prompt goes over **stdin**,
-  never argv: user content routinely exceeds the ~32K Windows command-line limit.
-- **`llama-cpp`** runs GGUF weights in-process. See below — it has its own setup and its own
-  factory functions.
-
-## Local models (`llama-cpp`)
-
-Runs GGUF weights in-process via [`node-llama-cpp`](https://node-llama-cpp.withcat.ai): no daemon,
-no API key, no per-token cost. Models are downloaded from Hugging Face on first use and cached in
-this library's own directory — see [Where models live](#where-models-live-and-clearing-them).
-
-`node-llama-cpp` is an **optional peer dependency**, so it is not installed unless you ask for it:
-
-```bash
-npm install node-llama-cpp
-```
-
-```ts
-import { makeProviderAsync, judge } from "@hawkeyexl/inference";
-
-const provider = await makeProviderAsync({ provider: "llama-cpp" });  // model defaults to "auto"
-const consensus = await judge({ provider, system, user, runs: 3 });
-```
-
-### Choosing a model
-
-`model` accepts a selector, a curated alias, or any Hugging Face GGUF reference:
-
-| Kind | Example |
-|---|---|
-| Selector | `auto` (default), `fast`, `balanced`, `quality` |
-| Curated alias | `gemma-4-e4b` |
-| Hugging Face URI | `hf:unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` |
-| Local file | `./models/my-model.gguf` |
-
-`auto` sizes the model to the machine using the **larger** of free GPU VRAM and half of system RAM
-(all of RAM, when there is no GPU or the probe fails). It is the larger rather than just VRAM
-because llama.cpp offloads the layers that fit onto the GPU and keeps the rest in system RAM — a
-box with a small GPU and plenty of RAM still runs a big model well, and sizing it off VRAM alone
-would leave most of the machine idle. The curated catalog is exported as `LLAMA_MODELS` if you want to inspect sizes and licenses
-before triggering a multi-gigabyte download:
-
-| Tier | Alias | Size | IFEval |
-|---|---|---|---|
-| `fast` | `gemma-4-e2b` | 2.62 GB | 94.6 |
-| `balanced` | `gemma-4-e4b` | 4.22 GB | 96.7 |
-| `quality` | `gemma-4-12b` | 6.72 GB | 97.2 |
-| — | `gemma-4-26b-a4b` | 14.25 GB | MoE, 3.8B active |
-| — | `gemma-4-e2b-q2` | 2.19 GB | smallest download |
-
-All entries are unsloth Gemma 4 QAT builds, Apache-2.0 and ungated. QAT is trained for 4-bit
-deployment, so it beats a stock Q4 quant of the same model at a smaller file size. Entries pin an
-exact blob path rather than a `:QUANT` tag, so a model can never silently re-point underneath a
-cache key that already names it.
-
-### Why selectors need `makeProviderAsync`
-
-Resolving `auto` reads GPU memory, which needs an `await`. The synchronous `makeProvider` and
-`resolveProviderIdentity` therefore **throw** when given an unresolved selector, rather than
-recording the literal `"auto"` as cache-key material — which would let a 2.6 GB and a 6.7 GB model
-share cached results, and make one key mean different things on different machines.
-
-Use `makeProviderAsync` / `resolveProviderIdentityAsync`, which return the concrete model the
-selector resolved to. Both delegate to the synchronous forms for every other provider, so you can
-switch over wholesale. A concrete model (alias, URI, or path) works with either.
-
-### Where models live, and clearing them
-
-Weights go in **this library's own directory** — `~/.hawkeyexl-inference/models`, not
-node-llama-cpp's global `~/.node-llama-cpp/models`. That default is shared with node-llama-cpp's
-CLI and anything else on the machine using it, so clearing it could destroy models this library
-never downloaded. Owning a directory removes the hazard instead of defending against it, and one
-copy is still shared across every consumer of this package on the machine.
-
-Override with `INFERENCE_MODELS_DIR`, or per provider:
-
-```ts
-makeProviderAsync({ provider: "llama-cpp", llamaCpp: { modelsDirectory: "/mnt/models" } });
-```
-
-```ts
-import { clearLlamaModels } from "@hawkeyexl/inference";
-
-const { files, freedBytes } = await clearLlamaModels();      // clear everything
-await clearLlamaModels({ dryRun: true });                    // report, delete nothing
-await clearLlamaModels({ models: ["gemma-4-12b"] });         // just one
-await clearLlamaModels({ directory: "/mnt/models" });        // a non-default directory
-```
-
-Interrupted `.ipull` partial downloads and every part of a split model are removed too. Only
-`.gguf` and `.gguf.ipull` files are ever touched and subdirectories are never walked, so pointing
-`directory` somewhere shared still cannot take out unrelated files. Loaded weights are disposed
-first, since a memory-mapped model cannot be deleted on Windows.
-
-### Things to know
-
-- **Cost is always 0.** There is no price-table entry, so `pricingFor` returns `undefined` and
-  `costOfRuns` yields `0` — the library never guesses a price.
-- **Your schema `description`s are not visible to the grammar.** `node-llama-cpp` compiles the
-  schema to GBNF without showing it to the model, so the provider restates the schema in the system
-  prompt (the same thing `claude-cli` does). Descriptions still steer the model; they just arrive
-  via the prompt.
-- **`required` is ignored and `additionalProperties` defaults to `false`.** Upstream emits every key
-  in `properties`, always. No effect on `VERDICT_SCHEMA`, which requires all its fields; worth
-  knowing if your schema has optional ones.
-- **Numeric bounds are not grammar-enforced.** A `minimum`/`maximum` violation comes back as
-  well-formed JSON and is caught by the normal Ajv validation and retry.
-- **Thinking is disabled by default.** A grammar constrains generation from token 0, which cuts a
-  thinking model off mid-thought. Set `llamaCpp: { thoughtTokens: 512 }` if you want reasoning
-  before the JSON.
-- **Weights load once per process** and are shared across providers naming the same model. Call
-  `disposeLlamaModels()` to free them in a long-lived process.
-
-## Testing against this library
-
-`MockProvider` is exported for exactly this. No network required:
-
-```ts
-import { MockProvider, mockVerdict, runEnsemble } from "@hawkeyexl/inference";
-
-const provider = new MockProvider([mockVerdict("pass", 0.95)]);   // cycles when exhausted
-const runs = await runEnsemble({ provider, system, user, runs: 3 });
-provider.requests;  // every request seen, in order
-```
-
-Script an error with `{ error: "429 rate limited" }` to exercise your failure paths.
-
-## API
-
-Everything exports from the package root.
-
-**Providers** — `makeProvider`, `makeProviderAsync`, `resolveProviderIdentity`,
-`resolveProviderIdentityAsync`, `detectProvider`, `availableProviders`, `DETECTION_ORDER`,
-`resetProviderDetectionWarning`, `resetClaudeCliProbe`,
-`DEFAULT_MODELS`, `DEFAULT_OPENAI_BASE_URL`, `AnthropicProvider`,
-`OpenAICompatProvider`, `ClaudeCliProvider`, `LlamaCppProvider`, `MockProvider`, `mockVerdict`,
-`extractJson`, `toStrictSchema`, `stripNulls`, `realExec`
-
-**Local models** — `LLAMA_MODELS`, `LLAMA_SELECTORS`, `LLAMA_TIERS`, `aliasForTier`,
-`isLlamaSelector`, `resolveLlamaModelRef`, `tierForBudget`, `uriForTier`, `defaultLlamaRuntime`,
-`disposeLlamaModels`, `clearLlamaModels`, `defaultLlamaModelsDirectory`, `isModelDownloaded`,
-`blobNameFor`
-
-**Completion** — `completeValidatedJSON`, `validatorFor`
-
-**Cache** — `JsonCache`, `buildCacheKey`, `sha256`
-
-**Cost** — `pricingFor`, `costOfUsage`, `costOfRuns`, `PRICE_TABLE`
-
-**Judge** — `judge`, `runEnsemble`, `computeConsensus`, `zoneFor`, `VERDICT_SCHEMA`,
-`DEFAULT_ZONES`
-
-**Errors** — `InferenceError` (operational failures: missing key, unknown provider)
-
-Types: `InferenceProvider`, `ProviderSpec`, `ProviderName`, `ProviderSelector`, `ProviderIdentity`,
-`CompleteJSONRequest`, `CompleteJSONResponse`, `InferenceRun`, `TokenUsage`, `Pricing`, `JudgeRun`,
-`JudgeVerdict`, `ConsensusResult`, `Match`, `Zone`, `ZoneThresholds`, `EnsembleOptions`, `ExecFn`,
-`ExecResult`, `ExecOptions`, `MockResponse`, `LlamaCppProviderOptions`, `LlamaRuntime`,
-`LlamaSession`, `LlamaLoadedModel`, `LlamaPromptOptions`, `LlamaPromptResult`, `LlamaModelEntry`,
-`LlamaSelector`, `LlamaTier`, `ClearLlamaModelsOptions`, `ClearLlamaModelsResult`,
-`ClearedModelFile`.
+Who the docs serve and why each page exists lives in
+[docs/content-strategy/](docs/content-strategy).
 
 ## Design decisions
 
@@ -373,8 +112,10 @@ Recorded as ADRs in [adrs/](adrs):
   losing variants are not reintroduced
 - [01003](adrs/01003-in-process-local-models-via-node-llama-cpp.md) — in-process local models via
   node-llama-cpp, why selectors need an async factory, and why the catalog pins exact blob paths
-- [01004](adrs/01004-provider-auto-detection.md) — detecting an available provider when none is
-  specified, the priority order, and why `mock` is excluded from it
+- [01004](adrs/01004-provider-auto-detection.md) — detect an available provider when none is
+  specified, ending at the local model
+- [01005](adrs/01005-docset-strategy-and-executable-examples.md) — a CUJ-first documentation set,
+  with samples that CI executes
 
 ## License
 

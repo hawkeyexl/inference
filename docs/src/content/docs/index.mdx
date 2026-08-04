@@ -1,0 +1,95 @@
+---
+title: "@hawkeyexl/inference"
+description: Schema-constrained LLM completion across four providers, with caching, cost accounting, and an LLM-as-judge ensemble.
+template: splash
+hero:
+  tagline: Send a system prompt, a user prompt, and a JSON Schema. Get back JSON that validates against that schema, or a recorded error.
+  actions:
+    - text: Get started
+      link: /inference/get-started/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/hawkeyexl/inference
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What are you building?
+
+<CardGrid>
+  <LinkCard
+    title="An eval or judging tool"
+    href="/inference/judge/"
+    description="Turn N independent model opinions into one decision, with consensus math and confidence zones your CLI can act on."
+  />
+  <LinkCard
+    title="One structured-extraction feature"
+    href="/inference/extract/"
+    description="A single schema-constrained call inside a tool that is otherwise deterministic. Ignore the judge layer entirely."
+  />
+  <LinkCard
+    title="Something that runs without a key"
+    href="/inference/local/"
+    description="GGUF weights in-process. No daemon, no API key, no per-token cost — for CI, air-gapped networks, and unfunded laptops."
+  />
+  <LinkCard
+    title="Tests for an integration"
+    href="/inference/keep-it-working/testing/"
+    description="Three injection seams that keep your unit tests off the network entirely."
+  />
+</CardGrid>
+
+## The contract
+
+One narrow thing, deliberately:
+
+```ts
+(system, user, schema, temperature) -> JSON
+```
+
+**No streaming. No multi-turn. No tool loops.** If you need a conversation, this is the wrong
+package — that is worth knowing in the next thirty seconds rather than after an afternoon.
+Widening the provider contract requires an [ADR](https://github.com/hawkeyexl/inference/tree/main/adrs),
+because every consumer pays for surface area added here.
+
+## What you get instead
+
+<CardGrid>
+  <Card title="Four providers, one call shape">
+    Anthropic, any OpenAI-compatible server, the Claude CLI, and in-process llama.cpp. Swapping is a
+    one-line change.
+  </Card>
+  <Card title="Validation with a retry">
+    Ajv-checked against your schema. One retry, then an honest failure — **never a throw, never a
+    coerced value.**
+  </Card>
+  <Card title="A cache you control">
+    Content-addressed, human-inspectable on disk. You compose the key, because only you know what
+    should invalidate an entry.
+  </Card>
+  <Card title="Cost that never guesses">
+    An unknown model prices as `undefined`, not as a number someone made up. Budget gates depend on
+    that distinction.
+  </Card>
+</CardGrid>
+
+## Before you start
+
+- **Node 24 or later.** Hard requirement.
+- **ESM only.** There is no CommonJS build.
+- Three runtime dependencies, plus one optional peer dependency for local models.
+
+```bash
+npm install @hawkeyexl/inference
+```
+
+## Two layers, one entry point
+
+Everything exports from the package root.
+
+- **Completion** — the provider contract, five providers, a content-addressed cache, a price table,
+  and a validate-and-retry wrapper. This is all [structured extraction](/inference/extract/) needs.
+- **Judge** — a canonical verdict schema, an N-run ensemble, consensus math, and confidence-zone
+  routing. Built on the completion layer. [Ignore it](/inference/extract/) if you do not need it.

@@ -1,0 +1,130 @@
+---
+title: Run models locally
+description: Run GGUF weights in-process with no daemon, no API key, and no per-token cost.
+sidebar:
+  order: 1
+---
+
+import { Aside, Code, Steps } from '@astrojs/starlight/components';
+import localProvider from '@examples/local-provider.mjs?raw';
+
+Remove the credential dependency without changing what your tool does.
+
+The `llama-cpp` provider runs GGUF weights in-process via
+[`node-llama-cpp`](https://node-llama-cpp.withcat.ai). No daemon, no API key, no per-token cost.
+
+## What stays the same
+
+Everything above the provider contract. `LlamaCppProvider` satisfies the same
+`InferenceProvider` interface, so your completion code, your judge code, your caching, and your
+schemas are all untouched.
+
+## What you must do differently
+
+<Steps>
+
+1. **Install the optional peer dependency.**
+
+   ```bash
+   npm install node-llama-cpp
+   ```
+
+   It is not installed with this package unless you ask for it. The `^3.19.0` floor is
+   load-bearing — Gemma 4 support landed there, and earlier versions cannot load anything in the
+   catalog.
+
+2. **Use the async factory.**
+
+   ```ts
+   const provider = await makeProviderAsync({ provider: "llama-cpp" });
+   ```
+
+   Not `makeProvider`. See below.
+
+</Steps>
+
+## What silently behaves differently
+
+Two things, and neither announces itself:
+
+- **Your budget gate goes inert.** Covered below.
+- **Four schema behaviors change** under grammar-constrained decoding. Covered in
+  [choosing a model](/inference/local/choosing-a-model/).
+
+## Why selectors need the async factory
+
+The default model is the selector `auto`, and resolving it reads GPU memory — which needs an
+`await`. So the synchronous forms **throw** rather than guess.
+
+<Code code={localProvider} lang="js" title="examples/local-provider.mjs" />
+
+```text
+sync factory refused: true
+message: llama-cpp model "auto" is a selector and cannot be resolved synchronously — picking a tier probes GPU memory. Use resolveProviderIdentityAsync/makeProviderAsync, or name a concrete model (e.g. "gemma-4-e4b").
+auto resolved to: { provider: 'llama-cpp', model: 'gemma-4-e4b' }
+model: gemma-4-e4b
+verdict: pass zone: auto-pass
+usage reported: { inputTokens: 420, outputTokens: 78 }
+```
+
+<Aside type="note" title="Why it refuses instead of recording &quot;auto&quot;">
+  Recording the literal `"auto"` as cache-key material would let a 2.62 GB and a 6.72 GB model share
+  cached results, and make one key mean different things on two machines. Refusing is the safe
+  answer.
+</Aside>
+
+`makeProviderAsync` and `resolveProviderIdentityAsync` return the model the selector actually
+resolved to. **Both delegate to the synchronous forms for every other provider**, so you can switch
+your whole codebase over rather than branching on provider name. A concrete model — an alias, a URI,
+or a path — works with either form.
+
+## The budget gate goes inert
+
+<Aside type="danger" title="Costs zero is not the same as cannot be priced">
+  There is no price-table entry for a local model, so `pricingFor` returns `undefined` and
+  `costOfRuns` yields `0`. Every `maxCostUsd` check now passes unconditionally.
+</Aside>
+
+Nothing is broken — the run genuinely costs nothing per token. But your gate is **inert**, not
+satisfied, and that matters beyond the local run: if you later switch one stage back to a hosted
+provider whose model is not in the price table, the gate is *still* inert.
+
+Guard on the price being known, not on the number:
+
+```ts
+const pricing = pricingFor(provider.modelName());
+if (pricing !== undefined && spent >= maxCostUsd) break;
+```
+
+See [cost and budgets](/inference/judge/cost-and-budgets/).
+
+## Testing without weights
+
+`LlamaRuntime` is the injection seam — the same one this library's own tests use. Pass a fake and
+the entire local path runs with no download, no GPU, and no weights:
+
+```ts
+await makeProviderAsync({ provider: "llama-cpp", llamaRuntime: myFakeRuntime });
+```
+
+Omit `llamaRuntime` in real use and the default runtime downloads and loads real weights. The sample
+above uses a fake, which is why it runs in CI. See
+[testing your integration](/inference/keep-it-working/testing/).
+
+## Long-lived processes
+
+Weights load **once per process** and are shared across every provider naming the same model. In a
+long-running process, `disposeLlamaModels()` frees them.
+
+## Next
+
+- [Choose a model](/inference/local/choosing-a-model/) — what `auto` picks, and what changes under a grammar
+- [Manage model files](/inference/local/managing-model-files/) — where weights live and how to reclaim the disk
+
+{/* test {"testId":"local-provider","description":"The llama-cpp provider driven through an injected runtime: selector refusal, async resolution, and an unchanged judge call."} */}
+{/* step {"description":"The synchronous factory refuses an unresolved selector and names the async twin (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/local-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"sync factory refused: true"}} */}
+{/* step {"description":"The synchronous factory refuses an unresolved selector and names the async twin (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/local-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"makeProviderAsync"}} */}
+{/* step {"description":"The async factory resolves auto to a concrete catalog model, never the literal selector","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/local-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"auto resolved to: { provider: 'llama-cpp', model: 'gemma-4-e4b' }"}} */}
+{/* step {"description":"Judge code is unchanged against a local provider, and usage is reported (1/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/local-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"verdict: pass zone: auto-pass"}} */}
+{/* step {"description":"Judge code is unchanged against a local provider, and usage is reported (2/2)","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/local-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"usage reported: { inputTokens: 420, outputTokens: 78 }"}} */}
+{/* test end */}
