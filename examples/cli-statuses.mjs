@@ -20,7 +20,7 @@ import {
 const cacheDir = mkdtempSync(join(tmpdir(), "inference-cli-"));
 const PROMPT_VERSION = 1;
 const MIN_CONFIDENCE = 0.7;
-const MAX_COST_USD = 0.009; // two calls
+const MAX_COST_USD = 0.009; // three calls, at $0.003 each
 
 const schema = {
   type: "object",

@@ -41,23 +41,21 @@ if (files.length === 0) {
   process.exit(2);
 }
 
-const routes = new Set(
-  files
-    .filter((f) => path.basename(f) === "index.html")
-    .map((f) => {
-      const rel = path.relative(DIST, path.dirname(f)).split(path.sep).join("/");
-      return rel === "" ? "/" : `/${rel}/`;
-    }),
-);
-
-/** route -> the set of element ids on that page, for validating `#fragment` links. */
+/**
+ * route -> the set of element ids on that page.
+ *
+ * One pass builds both the route set and the anchor index, so the route-derivation
+ * rule lives in exactly one place; the key set doubles as the list of valid routes.
+ */
 const anchors = new Map();
-for (const file of files.filter((f) => path.basename(f) === "index.html")) {
+for (const file of files) {
+  if (path.basename(file) !== "index.html") continue;
   const rel = path.relative(DIST, path.dirname(file)).split(path.sep).join("/");
   const route = rel === "" ? "/" : `/${rel}/`;
   const html = readFileSync(file, "utf8");
   anchors.set(route, new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1])));
 }
+const routes = anchors;
 
 const dead = new Set();
 let anchorsChecked = 0;

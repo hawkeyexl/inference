@@ -9,11 +9,17 @@
 //
 //     `Unknown provider "${name}". Available: ${list}.`
 //
-// is matched on its longest literal run — here `". Available: "` is short, but
-// `Unknown provider "` is distinctive enough. We require the longest literal segment
-// of every throw to appear somewhere on the page.
+// is assembled from several literal runs, and the page may elide an interpolation
+// (`"<P>"`) or wrap differently from the source. So we require **any one** literal run
+// of at least MIN_FINGERPRINT characters to appear on the page, not the whole message
+// and not specifically the longest run. An undocumented error matches none of its runs,
+// which is the case that matters.
 //
-// Exit 0 = every error documented, 1 = gaps, 2 = setup error.
+// A throw whose message is entirely dynamic — `throw new Error(`${message}`)` — has no
+// literal text to fingerprint. Those cannot be checked, so they are reported separately
+// rather than folded into the pass count, which would overstate coverage.
+//
+// Exit 0 = every checkable error documented, 1 = gaps, 2 = setup error.
 
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -83,13 +89,20 @@ function literalRuns(expression) {
 
 const normalisedReference = reference.replace(/\s+/g, " ");
 const missing = [];
+const unfingerprintable = [];
 let checked = 0;
 
 for (const file of files) {
   const text = readFileSync(file, "utf8");
   for (const match of text.matchAll(THROW)) {
     const candidates = literalRuns(match[1]).filter((run) => run.length >= MIN_FINGERPRINT);
-    if (candidates.length === 0) continue;
+    if (candidates.length === 0) {
+      // No literal text long enough to match on. Record it rather than dropping it,
+      // so the pass count never implies coverage this script cannot actually give.
+      const line = text.slice(0, match.index).split("\n").length;
+      unfingerprintable.push(`${file}:${line}  ${match[1].replace(/\s+/g, " ").trim()}`);
+      continue;
+    }
 
     // The page may quote a message with an interpolation elided (`"<M>"`) or wrapped
     // differently from the source. Requiring the *whole* message would force the page
@@ -117,4 +130,13 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-console.log(`All ${checked} throw sites are documented in the error reference.`);
+const total = checked + unfingerprintable.length;
+console.log(`All ${checked} of ${total} throw sites are documented in the error reference.`);
+
+if (unfingerprintable.length > 0) {
+  console.log(
+    `${unfingerprintable.length} could not be checked — the message is entirely dynamic, ` +
+      `so there is no literal text to match:`,
+  );
+  for (const entry of unfingerprintable) console.log(`  ${entry}`);
+}
