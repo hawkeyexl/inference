@@ -18,3 +18,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01004](01004-provider-auto-detection.md) | Detect an available provider when none is specified, ending at the local model |
 | [01005](01005-docset-strategy-and-executable-examples.md) | A CUJ-first documentation set, with samples that CI executes |
 | [01006](01006-documenting-failure-and-orchestration.md) | Document failure and orchestration, and gate both against the source |
+| [01007](01007-harden-two-operational-failure-paths.md) | Harden two operational failure paths: non-JSON CLI output, and an unsupported Node |

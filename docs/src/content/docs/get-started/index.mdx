@@ -16,8 +16,11 @@ unusable, and which of the two layers you actually need.
 ## Requirements
 
 - **Node 24 or later.** Declared in `engines`. npm warns with `EBADENGINE` on an older version
-  rather than refusing to install, and there is no runtime version check — so an older Node fails
-  later and less clearly. Treat the warning as an error.
+  rather than refusing to install, so nothing stops you at install time. The library itself then
+  [warns once](/inference/reference/warnings/) on first use — at `makeProvider` or
+  `completeValidatedJSON` — naming the version you are on. It does not refuse to run: nothing here
+  uses a Node-24-only API, so 24 is the support floor rather than a hard one. Treat either warning
+  as an error.
 - **ESM only.** The `exports` map exposes an `import` condition and no `require` one.
 
 `require("@hawkeyexl/inference")` therefore fails with **`ERR_PACKAGE_PATH_NOT_EXPORTED`** on every

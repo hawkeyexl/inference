@@ -66,7 +66,23 @@ export class ClaudeCliProvider implements InferenceProvider {
     }
 
     // --output-format json wraps the answer: { result: "...", ... }
-    const wrapper = JSON.parse(result.stdout) as { result?: string };
+    //
+    // When it isn't JSON at all the CLI is talking to a human, not to us — an
+    // update banner, a login prompt, a proxy interception page. A bare
+    // `SyntaxError: Unexpected token 'W'` would reach the end user of a
+    // consuming CLI naming neither the culprit nor the fix, so say who printed
+    // it and quote enough for a login prompt to be recognisable on sight.
+    // Collapsed to one line and capped, like the stderr tail above, so a
+    // megabyte of HTML cannot become the error message.
+    let wrapper: { result?: string };
+    try {
+      wrapper = JSON.parse(result.stdout) as { result?: string };
+    } catch {
+      const excerpt = result.stdout.trim().replace(/\s+/g, " ").slice(0, 200);
+      throw new Error(
+        `Claude CLI printed non-JSON output (is it logged in?): ${excerpt || "(no output)"}`,
+      );
+    }
     if (typeof wrapper.result !== "string") {
       throw new Error("Claude CLI returned no result field");
     }

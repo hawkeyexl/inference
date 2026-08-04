@@ -186,12 +186,23 @@ that you are not logged in.
 
 ### `Claude CLI returned no result field`
 
-The CLI's JSON envelope had no string `result`.
+The CLI's JSON envelope parsed, but had no string `result`.
 
-<Aside type="caution" title="Malformed CLI output surfaces as a raw SyntaxError">
-  If the CLI prints something that is not JSON at all — an update banner, a login prompt — the
-  envelope parse throws before this check, and a bare `SyntaxError: Unexpected token …` reaches
-  `run.error`. Unmistakable once you know to expect it.
+### `Claude CLI printed non-JSON output (is it logged in?): <first 200 chars>`
+
+The CLI exited 0 and printed something that is not the `--output-format json` envelope at all —
+an update banner, a login prompt, an auth error, a proxy interception page. The excerpt is what it
+actually printed, whitespace collapsed to one line and capped at 200 characters so a page of HTML
+cannot become the error message. `(no output)` means it printed nothing.
+
+**Fix:** read the excerpt. A login prompt means `claude` is not authenticated — run it yourself
+once. A banner or an HTML page means something is intercepting the command; try `claude -p
+--output-format json` by hand and see what comes back.
+
+<Aside type="note" title="Two envelope failures, deliberately distinct">
+  Non-JSON output and a JSON envelope missing `result` are different faults with different fixes,
+  so they stay different messages. The one above means the CLI never got as far as answering; the
+  one before it means it answered in a shape this library does not recognise.
 </Aside>
 
 ### `MockProvider needs at least one scripted response`

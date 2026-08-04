@@ -7,6 +7,7 @@
  * config on another's to reuse this layer (ADR 01000).
  */
 import { InferenceError } from "../types.js";
+import { warnIfUnsupportedNode } from "../runtime.js";
 import type { Pricing } from "../cost.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAICompatProvider } from "./openai-compat.js";
@@ -191,6 +192,10 @@ async function probeTier(runtime: LlamaRuntime | undefined): Promise<LlamaTier> 
 }
 
 export function makeProvider(spec: ProviderSpec): InferenceProvider {
+  // First use of the library, for anyone who goes through the factory — before
+  // the spec is even validated, so an unsupported Node is named ahead of any
+  // error it might be the real cause of.
+  warnIfUnsupportedNode();
   const { model } = resolveProviderIdentity(spec);
 
   switch (spec.provider) {

@@ -113,9 +113,47 @@ describe("ClaudeCliProvider", () => {
     );
   }, 30_000);
 
-  it("rejects unparseable stdout rather than coercing it", async () => {
-    const cli = writeFakeCli(`process.stdout.write("not json at all");`);
+  it("names the Claude CLI when stdout is not JSON, and quotes what it printed", async () => {
+    // A bare `SyntaxError: Unexpected token 'W'` reaches the end user of a
+    // consuming CLI verbatim, naming neither the culprit nor the fix. Every
+    // other failure in this provider explains itself; this one must too.
+    const cli = writeFakeCli(
+      `process.stdout.write("Welcome to Claude Code!\\n\\nPlease run /login to continue.");`,
+    );
     const provider = new ClaudeCliProvider("claude-sonnet-4-5", cli.command);
-    await expect(provider.completeJSON(REQUEST)).rejects.toThrow();
+
+    const error = await provider.completeJSON(REQUEST).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toMatch(/Claude CLI printed non-JSON output/);
+    expect(message).toMatch(/is it logged in/);
+    // The excerpt is what lets a reader recognise a login prompt on sight.
+    expect(message).toContain("Please run /login to continue.");
+    // ...on one line, so it stays a log line rather than a wall of banner.
+    expect(message).not.toContain("\n");
+    expect(message).not.toMatch(/no result field/);
+  }, 30_000);
+
+  it("bounds the excerpt so a megabyte of HTML cannot become the error", async () => {
+    // A proxy interception page is the realistic worst case here.
+    const cli = writeFakeCli(
+      `process.stdout.write("<html>" + "<div>blocked</div>".repeat(60000) + "</html>");`,
+    );
+    const provider = new ClaudeCliProvider("claude-sonnet-4-5", cli.command);
+
+    const error = await provider.completeJSON(REQUEST).catch((e: Error) => e);
+
+    expect((error as Error).message).toMatch(/Claude CLI printed non-JSON output/);
+    expect((error as Error).message.length).toBeLessThan(400);
+  }, 30_000);
+
+  it("says so when the CLI exits cleanly having printed nothing", async () => {
+    const cli = writeFakeCli(`process.exit(0);`);
+    const provider = new ClaudeCliProvider("claude-sonnet-4-5", cli.command);
+
+    await expect(provider.completeJSON(REQUEST)).rejects.toThrow(
+      /Claude CLI printed non-JSON output .*: \(no output\)/,
+    );
   }, 30_000);
 });

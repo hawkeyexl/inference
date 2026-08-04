@@ -10,6 +10,9 @@
 // Errors
 export { InferenceError } from "./types.js";
 
+// Runtime
+export { resetNodeVersionWarning } from "./runtime.js";
+
 // Provider contract
 export type {
   CompleteJSONRequest,
