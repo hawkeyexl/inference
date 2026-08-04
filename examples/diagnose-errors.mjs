@@ -85,6 +85,7 @@ console.log("10.", await cliError({ code: null, stdout: "", stderr: "", timedOut
 console.log("11.", await cliError({ code: null, stdout: "", stderr: "", timedOut: true }));
 console.log("12.", await cliError({ code: 1, stdout: "", stderr: "not logged in", timedOut: false }));
 console.log("13.", await cliError({ code: 0, stdout: "{}", stderr: "", timedOut: false }));
+console.log("14.", await cliError({ code: 0, stdout: "Welcome to Claude Code!\n\nRun /login to continue.", stderr: "", timedOut: false }));
 
 // ---------------------------------------------------------------------------
 // What a failure does to a verdict — the consequence readers miss.
@@ -99,6 +100,6 @@ const flaky = new MockProvider([
 const consensus = await judge({ provider: flaky, system: "s", user: "u", runs: 3 });
 
 console.log("\n[what it costs you]");
-console.log("14. two runs passed confidently, one errored");
+console.log("15. two runs passed confidently, one errored");
 console.log("    votes:", JSON.stringify(consensus.votes));
 console.log("    zone:", consensus.zone, "— a rate limit becomes a review queue, not an error");
