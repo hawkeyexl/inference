@@ -1,0 +1,195 @@
+---
+title: Choose a provider
+description: Compare the five providers, configure one through ProviderSpec, and read a provider's identity without constructing it.
+sidebar:
+  order: 2
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import chooseProvider from '@examples/choose-provider.mjs?raw';
+import detectProvider from '@examples/detect-provider.mjs?raw';
+
+Pick among five providers and configure the one you chose — or let the library pick for you.
+
+Full option tables are in the [providers reference](/inference/reference/providers/); this page is
+about making the decision.
+
+## Or don't choose
+
+Omit `provider` and the library detects the highest-priority one this machine can actually use,
+ending at the free local model. It works with no API keys at all.
+
+```ts
+const provider = await makeProviderAsync({});   // detects
+```
+
+<Code code={detectProvider} lang="js" title="examples/detect-provider.mjs" />
+
+```text
+detection order: [ 'anthropic', 'openai', 'claude-cli', 'llama-cpp' ]
+mock is never auto-selected: true
+sync factory refused: true
+detected: claude-cli
+detected is concrete: true
+```
+
+| Order | Available when |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` is non-empty |
+| `openai` | `OPENAI_API_KEY` is non-empty, **or** `baseUrl` is set (a keyless local server) |
+| `claude-cli` | `claude --version` runs and exits 0 |
+| `llama-cpp` | `node-llama-cpp` is installed |
+
+`mock` is never auto-selected. It answers `{ json: {} }` unless scripted, which would sail through
+as a real result — the opposite of the guarantee everything else here is built on. Ask for it by
+name.
+
+<Aside type="caution" title="Three things to know before relying on it">
+  - **Detection is async.** The synchronous `makeProvider` and `resolveProviderIdentity` throw when
+    `provider` is missing or `"auto"`, rather than emitting a non-concrete identity that would
+    poison a cache key.
+  - **`availableProviders()` is expensive.** Probing stops at the first hit for a reason: an env var
+    is microseconds, spawning the CLI is ~150 ms, and loading the llama binding is ~850 ms and
+    initialises the backend. `availableProviders()` necessarily runs all of them — fine for showing
+    a picker, wrong for a hot path.
+  - **Detection ignores a custom `apiKeyEnv`.** One field is shared by both API providers, so a
+    custom name cannot say which provider it belongs to. Name the `provider` explicitly when you use
+    one; `apiKeyEnv` still applies in full once you have.
+</Aside>
+
+Two one-time warnings are emitted: which provider was auto-selected — an env var moving between runs
+would otherwise silently change what an eval measured — and, if `llama-cpp` wins and its weights are
+absent, the model and download size before the download starts.
+
+## Choosing explicitly is not a commitment either
+
+`makeProvider` takes a flat, library-owned `ProviderSpec`. Swapping providers is a one-line change,
+and nothing above the provider contract knows or cares which one you picked. Do not over-deliberate
+this — you can change it later.
+
+One part of the choice *is* consequential, and it is the easiest column to skim past.
+
+## The five
+
+| `provider` | Structured output via | Credential | Reports usage |
+|---|---|---|:---:|
+| `anthropic` | a forced tool call | `ANTHROPIC_API_KEY` | **yes** |
+| `openai` | strict `json_schema`, falling back to `json_object` | `OPENAI_API_KEY` | **yes** |
+| `claude-cli` | schema in the prompt, `--output-format json` | your local `claude` auth | **no** |
+| `llama-cpp` | a GBNF grammar compiled from the schema | none — runs locally | **yes** |
+| `mock` | responses you script | none | synthetic |
+
+<Aside type="caution" title="Usage reporting is the consequential column">
+  `claude-cli` reports no token usage. `costOfUsage` and `costOfRuns` therefore yield `0`, and **any
+  budget gate over it is inert** — not satisfied, inert. Choosing `claude-cli` because it needs no
+  API key also means giving up cost accounting. The same applies to local models, for the same
+  reason: see [cost and budgets](/inference/judge/cost-and-budgets/).
+</Aside>
+
+## The spec
+
+Map your own config into `ProviderSpec` rather than passing your config object through. The
+library owns this shape so it does not have to know anything about yours — see
+[ADR 01000](https://github.com/hawkeyexl/inference/blob/main/adrs/01000-library-owned-provider-spec.md).
+
+```ts
+interface ProviderSpec {
+  // Omit, or pass "auto", to detect. Detection needs makeProviderAsync.
+  provider?: "anthropic" | "openai" | "claude-cli" | "llama-cpp" | "mock" | "auto";
+  model?: string | null;       // null or undefined -> the per-provider default
+  apiKeyEnv?: string | null;   // default ANTHROPIC_API_KEY / OPENAI_API_KEY
+  baseUrl?: string;            // openai only, default https://api.openai.com/v1
+  command?: string;            // claude-cli only, default "claude"
+  timeoutMs?: number;          // claude-cli only, default 180000
+  pricing?: Pricing;           // override the built-in price table
+  anthropic?: AnthropicProviderOptions;   // toolName, toolDescription, maxTokens
+  openai?: OpenAICompatProviderOptions;   // schemaName
+  llamaCpp?: LlamaCppProviderOptions;     // thoughtTokens, maxTokens, modelsDirectory
+  exec?: ExecFn;               // test seam for claude-cli
+  llamaRuntime?: LlamaRuntime; // test seam for llama-cpp
+  mockResponses?: MockResponse[];
+}
+```
+
+`null` and omission mean the same thing: use the default. If your config carries explicit `null`s,
+strip them rather than forwarding them.
+
+## Identity without construction
+
+Cache keys and price lookups need to know *which* provider and model — but they do not need a
+client, and a run served entirely from cache should not demand an API key.
+
+`resolveProviderIdentity(spec)` returns `{ provider, model }` while constructing nothing and reading
+no credential. Pair it with a lazy thunk so a fully-cached run never needs a key at all.
+
+<Code code={chooseProvider} lang="js" title="examples/choose-provider.mjs" />
+
+```text
+anthropic default: { provider: 'anthropic', model: 'claude-sonnet-4-5' }
+explicit model:   { provider: 'anthropic', model: 'claude-haiku-4-5' }
+openai default:   { provider: 'openai', model: 'gpt-4o-mini' }
+construction threw: true
+message: Anthropic provider needs EXAMPLE_KEY_THAT_IS_NOT_SET set (or choose another provider)
+identity without constructing: { provider: 'mock', model: 'mock-model' }
+provider constructed yet: false
+```
+
+<Aside type="tip">
+  Every existing consumer of this package rediscovered this pattern independently. It is the
+  difference between "a cached run needs no credentials" and "a cached run still throws on a
+  missing key."
+</Aside>
+
+## Two failure classes
+
+| Class | How it arrives | Examples |
+|---|---|---|
+| **Operational** | thrown as `InferenceError` | missing API key, unknown provider name, unresolved local selector |
+| **Model** | returned on `run.error` | schema validation failed after both attempts, provider API error, timeout |
+
+Catch `InferenceError` at your boundary and translate it into your own error type, or your CLI's
+exit-code mapping will not recognise it and a fixable config mistake becomes an unhandled stack
+trace.
+
+## Per-provider notes
+
+### `openai`
+
+Targets any `/chat/completions` server — OpenAI, Azure, Ollama, Groq, Together. It prefers strict
+`json_schema` mode, which requires rewriting your schema into a restricted subset: every property
+listed in `required`, optionality expressed as a `null` type union, and unsupported keywords
+dropped. Nulls are stripped back out of the response, so you see the schema you wrote.
+
+If the server rejects `response_format`, it permanently falls back to `json_object` with the schema
+restated in the prompt. Keyless servers are allowed — only `api.openai.com` requires a key.
+
+### `claude-cli`
+
+Uses your local Claude CLI authentication, so there is no API key to manage. The prompt goes over
+**stdin, never argv** — user content routinely exceeds the ~32K Windows command-line limit.
+
+Reports no usage. See the caution above.
+
+### `llama-cpp`
+
+Needs `makeProviderAsync` whenever the model is a selector like `auto`, because resolving one reads
+GPU memory. Start at [run models locally](/inference/local/).
+
+### `mock`
+
+Not just for tests — it is the fastest way to develop against this package before choosing anything.
+See [testing your integration](/inference/keep-it-working/testing/).
+
+## Next
+
+- Building a judge → [Judge & consensus](/inference/judge/)
+- Building extraction → [Structured extraction](/inference/extract/)
+- No credential available → [Run models locally](/inference/local/)
+
+{/* test {"testId":"choose-a-provider","description":"Auto-detection ordering, provider identity resolution without construction, and the operational-failure boundary."} */}
+{/* step {"description":"Detection order is fixed and never includes mock, which would pass an unscripted empty result as real.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/detect-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes(\"detection order: [ 'anthropic', 'openai', 'claude-cli', 'llama-cpp' ]\"),o);a.ok(o.includes('mock is never auto-selected: true'),o);"}} */}
+{/* step {"description":"The sync factory refuses to detect, and detection yields a concrete provider name.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/detect-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('sync factory refused: true'),o);a.ok(o.includes('detected is concrete: true'),o);"}} */}
+{/* step {"description":"Identity resolves for hosted providers with no credential present and no client constructed.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/choose-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes(\"anthropic default: { provider: 'anthropic', model: 'claude-sonnet-4-5' }\"),o);a.ok(o.includes(\"openai default:   { provider: 'openai', model: 'gpt-4o-mini' }\"),o);"}} */}
+{/* step {"description":"A missing credential is an operational failure, thrown as InferenceError at construction.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/choose-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('construction threw: true'),o);a.ok(o.includes('EXAMPLE_KEY_THAT_IS_NOT_SET'),o);"}} */}
+{/* step {"description":"The deferred-construction thunk leaves the provider unconstructed until first use.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/choose-provider.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('provider constructed yet: false'),o);a.ok(o.includes('provider constructed yet: true'),o);"}} */}
+{/* test end */}

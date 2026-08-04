@@ -1,0 +1,172 @@
+---
+title: Local models reference
+description: The curated catalog, tier selection, the LlamaRuntime seam, and model-file management.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Everything exported for the `llama-cpp` provider.
+
+For using it, see [run models locally](/inference/local/).
+
+## The catalog
+
+```ts
+const LLAMA_MODELS: Readonly<Record<string, LlamaModelEntry>>;
+
+interface LlamaModelEntry {
+  uri: string;        // an exact blob path, never a :QUANT tag
+  sizeBytes: number;
+  license: string;
+  tier?: LlamaTier;   // absent for entries outside the tier ladder
+  notes: string;
+}
+```
+
+| Alias | Size | Tier | License |
+|---|---:|---|---|
+| `gemma-4-e2b` | 2.62 GB | `fast` | Apache-2.0 |
+| `gemma-4-e4b` | 4.22 GB | `balanced` | Apache-2.0 |
+| `gemma-4-12b` | 6.72 GB | `quality` | Apache-2.0 |
+| `gemma-4-26b-a4b` | 14.25 GB | — | Apache-2.0 |
+| `gemma-4-e2b-q2` | 2.19 GB | — | Apache-2.0 |
+
+All entries are unsloth Gemma 4 QAT builds, ungated. Each is deep-frozen.
+
+The catalog is a **vetted default set, not a whitelist gate** — any Hugging Face GGUF reference or
+local `.gguf` path also works.
+
+## Selectors and tiers
+
+```ts
+const LLAMA_TIERS: readonly ["fast", "balanced", "quality"];
+const LLAMA_SELECTORS: readonly ["auto", "fast", "balanced", "quality"];
+type LlamaTier = (typeof LLAMA_TIERS)[number];
+type LlamaSelector = (typeof LLAMA_SELECTORS)[number];
+
+function isLlamaSelector(model: string): model is LlamaSelector;
+function tierForBudget(budgetBytes: number): LlamaTier;
+function aliasForTier(tier: LlamaTier): string;
+function uriForTier(tier: LlamaTier): string;
+function resolveLlamaModelRef(model: string): string;
+```
+
+`tierForBudget` requires `sizeBytes * 3.5 <= budget`, walks tiers smallest to largest, and floors at
+`fast`.
+
+`resolveLlamaModelRef` expands an alias to its pinned URI and passes through `hf:`,
+`huggingface:`, `hf.co/`, `http(s)://`, and anything ending `.gguf`. It **throws** for a selector,
+and rejects a bare `user/repo` as a mistyped alias rather than guessing.
+
+## Model files on disk
+
+```ts
+function defaultLlamaModelsDirectory(): string;
+function blobNameFor(model: string): string;
+function isModelDownloaded(model: string, directory: string): boolean;
+function clearLlamaModels(options?: ClearLlamaModelsOptions): Promise<ClearLlamaModelsResult>;
+function disposeLlamaModels(): Promise<void>;
+
+interface ClearLlamaModelsOptions {
+  directory?: string;
+  models?: string[];   // aliases or URIs; omit to clear everything
+  dryRun?: boolean;
+}
+
+interface ClearLlamaModelsResult {
+  files: { path: string; sizeBytes: number }[];
+  freedBytes: number;
+  directory: string;
+  dryRun: boolean;
+}
+```
+
+`defaultLlamaModelsDirectory()` is `INFERENCE_MODELS_DIR` or `~/.hawkeyexl-inference/models` — this
+library's **own** directory, deliberately not node-llama-cpp's shared `~/.node-llama-cpp/models`.
+
+<Aside type="tip" title="clearLlamaModels safety guarantees">
+  - Only `.gguf` and `.gguf.ipull` files are ever touched.
+  - Top level only; subdirectories are never walked.
+  - Loaded weights are disposed first — a memory-mapped model cannot be deleted on Windows.
+  - A file held open is skipped, not forced.
+  - `dryRun` reports `files` and `freedBytes` and deletes nothing.
+
+  Pointing `directory` at a shared location still cannot take out unrelated files.
+</Aside>
+
+Selective clearing matches by **suffix**, because downloads are prefixed `hf_<user>_`, and removes
+every part of a split model. An unknown name is rejected rather than silently matching nothing.
+
+`disposeLlamaModels()` frees the process-wide weight cache. Weights load once per process and are
+shared across providers naming the same model.
+
+## The runtime seam
+
+```ts
+interface LlamaRuntime {
+  resolveModelFile(uri: string, directory: string): Promise<string>;
+  loadModel(path: string): Promise<LlamaLoadedModel>;
+  getMemoryBudgetBytes(): Promise<number>;
+}
+
+interface LlamaLoadedModel {
+  createSession(systemPrompt: string): Promise<LlamaSession>;
+  dispose(): Promise<void>;
+}
+
+interface LlamaSession {
+  prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  dispose(): Promise<void>;
+}
+
+interface LlamaPromptOptions {
+  schema: Record<string, unknown>;
+  temperature: number;
+  thoughtTokens: number;
+  maxTokens?: number;
+}
+
+interface LlamaPromptResult {
+  text: string;
+  usage?: TokenUsage;
+  stopReason?: string;
+}
+
+function defaultLlamaRuntime(): LlamaRuntime;
+```
+
+`defaultLlamaRuntime()` is a lazy adapter over `await import("node-llama-cpp")`; a missing module
+raises an `InferenceError` naming `npm i node-llama-cpp`. The built `dist/index.js` contains only
+the dynamic import, so consumers without the package still typecheck.
+
+Inject a fake through `ProviderSpec.llamaRuntime` to test the whole local path with no weights and
+no GPU. See [testing your integration](/inference/keep-it-working/testing/).
+
+`getMemoryBudgetBytes` returns `max(free VRAM, totalmem() / 2)`, falling back to `totalmem() / 2`
+when the GPU probe fails.
+
+## `LlamaCppProvider`
+
+```ts
+class LlamaCppProvider implements InferenceProvider {
+  constructor(model: string, options?: LlamaCppProviderOptions);
+}
+
+interface LlamaCppProviderOptions {
+  runtime?: LlamaRuntime;
+  thoughtTokens?: number;   // default 0
+  maxTokens?: number;
+  modelsDirectory?: string;
+}
+```
+
+A fresh session per call — the contract is single-shot. The schema is compiled to a GBNF grammar
+**and** restated in the system prompt, because the grammar hides descriptions from the model.
+Truncation at `maxTokens` is reported as an error naming the limit rather than a validation failure.
+
+## Source of truth
+
+`src/providers/llama-models.ts`, `llama-cpp.ts`, and `llama-clean.ts`. Catalog invariants, tier
+selection, and every clearing rule are pinned in `test/unit/llama-*.test.ts`.

@@ -1,0 +1,96 @@
+---
+title: Cache reference
+description: JsonCache, buildCacheKey, sha256, and the on-disk file format.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A content-addressed JSON cache, and the key-composition helpers.
+
+For using it, see [caching](/inference/judge/caching/).
+
+## `JsonCache`
+
+```ts
+class JsonCache<T> {
+  constructor(dir: string, enabled?: boolean, label?: string);
+  get(key: string): T | undefined;
+  set(key: string, value: T): void;
+}
+```
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `dir` | — | Created on first write. |
+| `enabled` | `true` | When `false`, `get` always returns `undefined` and `set` does nothing. |
+| `label` | `"inference"` | Prefixes the one-time write-failure warning. Use your tool's name. |
+
+`get` returns `undefined` when the cache is disabled, the file is missing, or the contents are
+unparseable. **A corrupt entry is a miss, never a crash.**
+
+<Aside type="caution" title="It cannot validate your value shape">
+  `JsonCache` deliberately does not know what you store, so a well-formed but *obsolete* entry —
+  written by an older version of your own schema — replays happily. Wrap it and re-validate on
+  read. See [the pattern](/inference/judge/caching/#reject-a-stale-entry).
+</Aside>
+
+### Write failures never abort a run
+
+> The cache is an optimization, never a dependency.
+
+A failed write warns **once per instance**, prefixed with `label`, and the run continues. A
+read-only workspace or a full disk must not abort work whose inference already succeeded and was
+already paid for.
+
+## File format
+
+One file per key:
+
+```text
+<dir>/<key>.json
+```
+
+The contents are `JSON.stringify(value, null, 2)` — deliberately human-inspectable, so you can read
+a cached ensemble without tooling. This format is pinned by a test.
+
+## `buildCacheKey`
+
+```ts
+function buildCacheKey(parts: string[]): string;
+```
+
+Each part is **length-prefixed** as `${part.length}:${part}`, joined with `|`, then hashed with
+SHA-256. The length prefix is why `["a|b", "c"]` and `["a", "b|c"]` produce different keys — you can
+compose from user-controlled strings without separator collisions.
+
+Keep parts short. Pre-hash long content with `sha256`.
+
+## `sha256`
+
+```ts
+function sha256(text: string): string;
+```
+
+Hex SHA-256. Use it to compress a page body or document into a key part.
+
+## Composing a key
+
+```ts
+const cacheKey = buildCacheKey([
+  provider.provider(),
+  provider.modelName(),
+  `v${MY_PROMPT_VERSION}`,
+  `r${runs}`,
+  sha256(pageBody),
+]);
+```
+
+This library ships **no `PROMPT_VERSION`** and no domain prompt text. It hashes the parts you name;
+deciding what invalidates an entry is yours.
+
+## Source of truth
+
+`src/cache.ts`. The format, the collision property, and the warn-once behavior are pinned in
+`test/unit/cache.test.ts`.

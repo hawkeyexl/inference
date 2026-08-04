@@ -1,0 +1,75 @@
+---
+title: Budgets and errors
+description: Keep an optional feature inside a cost ceiling, and make every failure land as a warning rather than a stack trace.
+sidebar:
+  order: 2
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Gating on cost and degrading gracefully inside a host CLI.
+
+<Aside type="caution" title="This page is planned">
+  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
+</Aside>
+
+## Two failure classes
+
+| Class | How it arrives | Examples | Handling |
+|---|---|---|---|
+| **Operational** | thrown as `InferenceError` | missing API key, unknown provider, unresolved selector | Catch at the boundary, translate, exit with your config-error code |
+| **Model** | returned on `run.error` | validation failed after both attempts, provider error, timeout | Never thrown. Record, skip the subject, continue |
+
+Collapsing them turns a fixable configuration mistake into an unhandled stack trace.
+
+## Translate `InferenceError`
+
+Every consumer of this package wraps it:
+
+```ts
+import { InferenceError, makeProvider } from "@hawkeyexl/inference";
+
+try {
+  return makeProvider(spec);
+} catch (error) {
+  if (error instanceof InferenceError) throw new MyToolError(error.message);
+  throw error;
+}
+```
+
+Without this, your `fail()` handler does not recognise the error type and your exit-code contract
+breaks.
+
+## Gate before spending
+
+```ts
+let spent = 0;
+const pricing = pricingFor(model, config.pricing);
+
+for (const doc of documents) {
+  if (pricing !== undefined && spent >= config.maxCostUsd) break;
+  const run = await completeValidatedJSON({ /* ... */ });
+  spent += costOfUsage(run.usage, pricing);
+}
+```
+
+The `pricing !== undefined` guard matters: an unpriced model makes the gate
+[inert](/inference/judge/cost-and-budgets/#the-trap), not satisfied.
+
+<Aside type="caution" title="The ceiling is soft">
+  `InferenceRun` carries only the successful attempt's usage, so a retried request under-reports.
+  Leave headroom.
+</Aside>
+
+## Degrade, do not fail
+
+A missing key, a read-only cache, or a blown budget should warn and skip the optional feature. The
+deterministic path must be untouched.
+
+## Meanwhile
+
+- [Cost and budgets](/inference/judge/cost-and-budgets/) — the pricing rules in full
+- [Cost reference](/inference/reference/cost/) — signatures and the price table

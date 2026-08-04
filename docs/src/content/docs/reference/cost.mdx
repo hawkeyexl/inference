@@ -1,0 +1,110 @@
+---
+title: Cost reference
+description: PRICE_TABLE, pricingFor resolution order, costOfUsage, and costOfRuns.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Token pricing and run costing.
+
+For using them, see [cost and budgets](/inference/judge/cost-and-budgets/).
+
+## `Pricing`
+
+```ts
+interface Pricing {
+  inputPerMTok: number;   // USD per 1M input tokens
+  outputPerMTok: number;  // USD per 1M output tokens
+}
+```
+
+## `PRICE_TABLE`
+
+```ts
+const PRICE_TABLE: Record<string, Pricing>;
+```
+
+| Model | Input / 1M | Output / 1M |
+|---|---:|---:|
+| `claude-opus-4-8` | $15.00 | $75.00 |
+| `claude-sonnet-4-5` | $3.00 | $15.00 |
+| `claude-sonnet-4-6` | $3.00 | $15.00 |
+| `claude-haiku-4-5` | $1.00 | $5.00 |
+| `gpt-4o` | $2.50 | $10.00 |
+| `gpt-4o-mini` | $0.15 | $0.60 |
+
+Local models are deliberately absent — they have no per-token cost.
+
+<Aside type="note">
+  Read the table at runtime rather than copying these numbers. It is exported precisely so a
+  consumer can enumerate what it knows.
+</Aside>
+
+## `pricingFor`
+
+```ts
+function pricingFor(model: string, override?: Pricing): Pricing | undefined;
+```
+
+Resolution order:
+
+1. **`override`**, if supplied.
+2. **Exact match** in `PRICE_TABLE`.
+3. **Longest matching prefix.**
+
+Longest rather than first, so a pinned variant such as `claude-sonnet-4-5-20250929` resolves to its
+family price, and a longer, more specific entry added later cannot be shadowed by a shorter one.
+
+Returns `undefined` when nothing matches. **Never a guess.**
+
+<Aside type="danger" title="undefined makes a budget gate inert">
+  `costOfUsage` and `costOfRuns` return `0` for undefined pricing, so a `maxCostUsd` check passes
+  unconditionally. Guard on `pricingFor(...) !== undefined`, not on the number.
+</Aside>
+
+## `costOfUsage`
+
+```ts
+function costOfUsage(usage: TokenUsage | undefined, pricing: Pricing | undefined): number;
+```
+
+Returns `0` when either argument is `undefined`. Otherwise:
+
+```text
+(inputTokens / 1e6) * inputPerMTok + (outputTokens / 1e6) * outputPerMTok
+```
+
+## `costOfRuns`
+
+```ts
+function costOfRuns(
+  runs: { usage?: TokenUsage; cached?: boolean }[],
+  pricing: Pricing | undefined,
+): number;
+```
+
+Sums `costOfUsage` across runs, **skipping**:
+
+- runs flagged `cached` — a replay costs nothing;
+- runs with no `usage` — `claude-cli` reports none.
+
+Accepts both `InferenceRun[]` and `JudgeRun[]`.
+
+## What is never charged
+
+| Case | Why |
+|---|---|
+| A cached replay | Flagged `cached`; no call was made |
+| A `claude-cli` run | The provider reports no token usage |
+| A local model run | No price-table entry, by design |
+| An unknown hosted model | `pricingFor` returns `undefined` |
+| The failed attempt of a retry | `InferenceRun` carries only the successful attempt's usage |
+
+Only the first row is a genuine zero. The rest are unmeasurable, unpriceable, or under-reported —
+distinguish them before trusting a budget.
+
+## Source of truth
+
+`src/cost.ts`. Prefix resolution and the exclusion rules are pinned in `test/unit/cost.test.ts`.

@@ -1,0 +1,125 @@
+---
+title: Choosing a model
+description: Map your machine's memory to the model auto will pick, and learn the four schema behaviors that change under a grammar.
+sidebar:
+  order: 2
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import localCatalog from '@examples/local-catalog.mjs?raw';
+
+What `auto` picks, how to override it, and what stops working once a grammar is doing the
+constraining.
+
+The full catalog and signatures are in the
+[local models reference](/inference/reference/local-models/).
+
+## What you can pass as `model`
+
+| Kind | Example |
+|---|---|
+| Selector | `auto` (default), `fast`, `balanced`, `quality` |
+| Curated alias | `gemma-4-e4b` |
+| Hugging Face URI | `hf:unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` |
+| Local file | `./models/my-model.gguf` |
+
+A bare `user/repo` is **rejected** rather than guessed at — it is almost always a mistyped alias.
+
+## How `auto` measures your machine
+
+It takes the **larger** of free GPU VRAM and half of system RAM. All of RAM when there is no GPU, or
+when the probe fails.
+
+Larger rather than VRAM alone because llama.cpp offloads the layers that fit onto the GPU and keeps
+the rest in system RAM. A box with a small GPU and plenty of RAM still runs a big model well, and
+sizing off VRAM alone would leave most of the machine idle.
+
+A model needs **3.5× its file size** in that budget. Tiers are walked smallest to largest, and the
+result floors at `fast` — you always get something.
+
+## Inspect before you download
+
+The catalog is exported, so you can see sizes and licenses before triggering a multi-gigabyte
+download.
+
+<Code code={localCatalog} lang="js" title="examples/local-catalog.mjs" />
+
+```text
+catalog:
+  gemma-4-e2b       2.62 GB  Apache-2.0  tier=fast
+  gemma-4-e4b       4.22 GB  Apache-2.0  tier=balanced
+  gemma-4-12b       6.72 GB  Apache-2.0  tier=quality
+  gemma-4-26b-a4b  14.25 GB  Apache-2.0  tier=-
+  gemma-4-e2b-q2    2.19 GB  Apache-2.0  tier=-
+
+what auto picks:
+   6 GB budget -> fast     -> gemma-4-e2b
+   8 GB budget -> fast     -> gemma-4-e2b
+  16 GB budget -> balanced -> gemma-4-e4b
+  24 GB budget -> quality  -> gemma-4-12b
+  32 GB budget -> quality  -> gemma-4-12b
+```
+
+Every catalog entry is Apache-2.0 and ungated, which matters if you operate somewhere that audits
+model licenses.
+
+`tierForBudget` is exported, so you can check what a machine you do not have in front of you would
+get.
+
+## Why blob paths are pinned
+
+Catalog entries pin an **exact blob path**, never a `:QUANT` tag:
+
+```text
+hf:unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+```
+
+A tag could be re-pointed upstream, which would silently change the weights behind a cache key that
+already names the model. Pinning removes that possibility. If you have a populated cache, this is
+the detail that protects it.
+
+<Aside type="note">
+  All catalog entries are unsloth Gemma 4 QAT builds. QAT is trained for 4-bit deployment, so it
+  beats a stock Q4 quant of the same model at a smaller file size. That is the whole of what you
+  need to know about quantization here.
+</Aside>
+
+## What changes under a grammar
+
+The schema is compiled to a GBNF grammar. Four behaviors differ from a hosted provider, and a schema
+that works against Anthropic can behave differently here:
+
+1. **`required` is ignored.** Every key in `properties` is always emitted.
+2. **`additionalProperties` defaults to `false`.**
+3. **Numeric bounds are not enforced by the grammar.** A `minimum`/`maximum` violation comes back as
+   well-formed JSON and is caught by the normal Ajv validation and retry.
+4. **`description`s are invisible to the grammar.** The provider restates the schema in the system
+   prompt instead, so descriptions still steer the model — they just arrive by a different route.
+
+None of these affect the built-in `VERDICT_SCHEMA`, which requires all of its fields. They matter if
+you wrote your own — see [custom verdict schema](/inference/judge/verdict-schema/).
+
+## Thinking is off by default
+
+A grammar constrains generation from token zero, which cuts a reasoning model off mid-thought. So
+thinking is disabled unless you budget for it:
+
+```ts
+await makeProviderAsync({
+  provider: "llama-cpp",
+  llamaCpp: { thoughtTokens: 512 },
+});
+```
+
+If local output looks worse than you expected, check this before blaming the model.
+
+## Next
+
+- [Manage model files](/inference/local/managing-model-files/) — where weights live, and reclaiming disk
+- [Local models reference](/inference/reference/local-models/) — the full catalog and every export
+
+{/* test {"testId":"local-catalog","description":"Catalog inspection, tier selection by memory budget, and pinned blob paths."} */}
+{/* step {"description":"The catalog reports sizes and licenses matching the table on the page.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/local-catalog.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('gemma-4-e2b       2.62 GB  Apache-2.0  tier=fast'),o);a.ok(o.includes('gemma-4-12b       6.72 GB  Apache-2.0  tier=quality'),o);"}} */}
+{/* step {"description":"Memory budgets map to the tiers shown on the page, flooring at fast.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/local-catalog.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('16 GB budget -> balanced -> gemma-4-e4b'),o);a.ok(o.includes('24 GB budget -> quality  -> gemma-4-12b'),o);"}} */}
+{/* step {"description":"Aliases and tiers resolve to an exact blob path, never a quant tag.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/local-catalog.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('hf:unsloth/gemma-4-12B-it-qat-GGUF/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf'),o);a.ok(!o.includes(':Q4_K_XL\\n'),o);"}} */}
+{/* test end */}

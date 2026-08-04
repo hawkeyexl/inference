@@ -1,0 +1,67 @@
+---
+title: Exec reference
+description: realExec, ExecFn, ExecOptions, and ExecResult.
+sidebar:
+  order: 7
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The cross-platform subprocess helper.
+
+<Aside type="caution" title="This page is planned">
+  Prose and examples are thin. The signatures below are complete and accurate.
+</Aside>
+
+## Types
+
+```ts
+type ExecFn = (cmd: string[], opts?: ExecOptions) => Promise<ExecResult>;
+
+interface ExecOptions {
+  cwd?: string;
+  timeoutMs?: number;
+  env?: Record<string, string | undefined>;  // undefined UNSETS an inherited var
+  input?: string;                            // piped to stdin, then closed
+}
+
+interface ExecResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  spawnError?: string;   // present when the process could not start
+}
+
+const realExec: ExecFn;
+```
+
+## Behavior
+
+- **argv array, no shell.** `shell: true` is never set. npm shims still resolve on Windows.
+- **`env: { FOO: undefined }` unsets `FOO`** rather than setting it to `""`. Empty string and absent
+  are different things to many programs, `git` among them.
+- **`input` is piped and the stream closed.** `EPIPE` is swallowed.
+- **Both pipes use `setEncoding("utf8")`**, so multi-byte characters split across chunk boundaries
+  decode correctly.
+- **The timeout settles on the timer itself**, not on `close`, so a child that ignores SIGTERM
+  cannot hang the caller.
+- **It returns rather than throws.** A spawn failure is `spawnError`; a timeout is `timedOut`.
+
+## Two different default timeouts
+
+| Where | Default |
+|---|---|
+| `realExec` (`opts.timeoutMs`) | 60000 ms |
+| `ClaudeCliProvider` constructor | 180000 ms |
+
+The provider passes its own value through, so the 60 s default applies only when you call
+`realExec` yourself.
+
+## Source of truth
+
+`src/exec.ts` and `src/providers/types.ts`. Behavior is pinned in `test/unit/exec.test.ts`,
+including a 50,000-character multi-byte stdin round-trip and a SIGTERM-ignoring child.

@@ -1,0 +1,66 @@
+---
+title: Upgrading
+description: What survives a version bump, what invalidates a cached ensemble, and how the release channels map to what you install.
+sidebar:
+  order: 2
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Upgrading without silently discarding — or silently misreading — a populated cache.
+
+<Aside type="caution" title="This page is planned">
+  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
+</Aside>
+
+## `JudgeRun` is a file format
+
+<Aside type="danger">
+  `JudgeRun` is persisted to your on-disk cache. Renaming or removing one of its fields invalidates
+  **every cached ensemble you hold**.
+</Aside>
+
+It is treated as a file format inside this repository, and such changes carry a `BREAKING CHANGE:`
+footer so semantic-release majors correctly. If a major version arrives, assume your judge cache is
+stale until you have checked.
+
+## What the library can and cannot invalidate
+
+**It cannot invalidate your cache.** You compose the key; the library only hashes the parts you hand
+it. There is no `PROMPT_VERSION` here and no library-owned invalidation signal, by design.
+
+**It can change what a key means.** If `JudgeRun` gains or loses a field, an entry written before
+the upgrade deserializes differently afterwards.
+
+So your protection is entirely your own, and it is two things you should already have from
+[caching](/inference/judge/caching/):
+
+1. A version marker in the key — bump it when your prompt, your schema, or your expectations change.
+2. A recheck-on-read wrapper that rejects entries whose shape no longer matches.
+
+## Release channels
+
+semantic-release with conventional commits:
+
+| Branch | Channel |
+|---|---|
+| `main` | stable — what a caret range resolves to |
+| `next` | prerelease |
+| `feat/**` | its own npm dist-tag, derived from the branch name |
+
+A caret range gets `main` only. The per-branch dist-tags exist for testing an in-progress feature and
+will not reach you by accident.
+
+## One local-model wrinkle
+
+A resolved selector changes the model name in your cache key. Weights cached under `auto` on one
+machine will not be hit on a machine with more memory — that is the async factory working as
+intended, not a cache bug.
+
+## Meanwhile
+
+- [Caching](/inference/judge/caching/) — key composition and the recheck-on-read pattern
+- [Cache reference](/inference/reference/cache/) — the on-disk format

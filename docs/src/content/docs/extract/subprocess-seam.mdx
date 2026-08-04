@@ -1,0 +1,68 @@
+---
+title: The subprocess seam
+description: realExec is a general-purpose cross-platform subprocess helper, usable for commands that have nothing to do with inference.
+sidebar:
+  order: 3
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Using this package's subprocess helper for your own commands.
+
+<Aside type="caution" title="This page is planned">
+  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
+</Aside>
+
+## It is public, and it is general
+
+`realExec` exists because the `claude-cli` provider needs a subprocess helper — but it is exported,
+tested, cross-platform, and has nothing provider-specific in it. If you already depend on this
+package, you can drive `git`, a linter, or anything else with it.
+
+```ts
+import { realExec } from "@hawkeyexl/inference";
+
+const result = await realExec(["git", "log", "-1", "--format=%H"], { cwd: repoRoot });
+if (result.code === 0) console.log(result.stdout.trim());
+```
+
+## Four behaviors that were each earned
+
+- **argv array, never a shell.** No quoting hazards, no injection surface. npm shims still resolve
+  on Windows.
+- **stdin over argv.** `opts.input` is piped and the stream closed. The `claude-cli` provider relies
+  on this because user content routinely exceeds the ~32K Windows command-line limit.
+- **`env` values accept `undefined` to *unset*.** Not blank — unset. Empty string and absent are
+  different things to `git`.
+- **The timeout settles on the timer**, not on `close`, so a child that ignores SIGTERM cannot hang
+  the caller.
+
+Multi-byte UTF-8 split across chunk boundaries also decodes correctly — both pipes get
+`setEncoding("utf8")`.
+
+## It returns, it does not throw
+
+```ts
+interface ExecResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  spawnError?: string;
+}
+```
+
+A failure to spawn is `spawnError`, not an exception. Check the fields.
+
+## Inject a fake in tests
+
+`ExecFn` is the seam. Pass one through `ProviderSpec.exec` for `claude-cli`, or into your own code,
+and never spawn in a unit test. See
+[testing your integration](/inference/keep-it-working/testing/#execfn).
+
+## Meanwhile
+
+- [Exec reference](/inference/reference/exec/) — full signatures

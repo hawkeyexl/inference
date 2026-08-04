@@ -1,0 +1,122 @@
+---
+title: Errors and type index
+description: InferenceError, and every type exported from the package root, with the page that documents each.
+sidebar:
+  order: 8
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The error class, and a complete index of exported types.
+
+<Aside type="caution" title="This page is planned">
+  The index below is complete and accurate. Per-type prose is thin — follow the links.
+</Aside>
+
+## `InferenceError`
+
+```ts
+class InferenceError extends Error {
+  constructor(message: string);
+}
+```
+
+`name` is `"InferenceError"`. It is thrown for **operational** failures only:
+
+- a missing API key,
+- an unknown provider name,
+- an unresolved `"auto"` provider passed to a synchronous factory,
+- an unresolved local model selector passed to a synchronous factory,
+- `node-llama-cpp` not installed when a local provider is constructed,
+- detection finding no usable provider — the message names every provider and why each was
+  unavailable.
+
+**A model failure is never thrown.** It is recorded on `run.error`. Two classes, two handling paths —
+see [budgets and errors](/inference/extract/budgets-and-errors/).
+
+Catch it at your boundary and translate it into your own error type, or your CLI's exit-code mapping
+will not recognise it.
+
+## Type index
+
+Everything below exports from the package root. 36 types, 52 values.
+
+### Provider contract
+
+| Type | Documented in |
+|---|---|
+| `InferenceProvider` | [Providers](/inference/reference/providers/#the-contract) |
+| `CompleteJSONRequest` | [Providers](/inference/reference/providers/#the-contract) |
+| `CompleteJSONResponse` | [Providers](/inference/reference/providers/#the-contract) |
+| `TokenUsage` | [Providers](/inference/reference/providers/#the-contract) |
+
+### Provider configuration
+
+| Type | Documented in |
+|---|---|
+| `ProviderSpec` | [Providers](/inference/reference/providers/#providerspec) |
+| `ProviderName` | [Providers](/inference/reference/providers/#providerspec) |
+| `ProviderSelector` | [Providers](/inference/reference/providers/#providerspec) |
+| `ProviderIdentity` | [Providers](/inference/reference/providers/#factories) |
+| `AnthropicProviderOptions` | [Providers](/inference/reference/providers/#per-provider-options) |
+| `OpenAICompatProviderOptions` | [Providers](/inference/reference/providers/#per-provider-options) |
+| `LlamaCppProviderOptions` | [Local models](/inference/reference/local-models/#llamacppprovider) |
+| `MockResponse` | [Providers](/inference/reference/providers/#mock) |
+
+### Completion
+
+| Type | Documented in |
+|---|---|
+| `CompleteValidatedOptions` | [Completion](/inference/reference/completion/#completevalidatedoptions) |
+| `InferenceRun` | [Completion](/inference/reference/completion/#inferencerun) |
+
+### Judge
+
+| Type | Documented in |
+|---|---|
+| `EnsembleOptions` | [Judge](/inference/reference/judge/#ensembleoptions) |
+| `JudgeRun` | [Judge](/inference/reference/judge/#judgerun-and-judgeverdict) |
+| `JudgeVerdict` | [Judge](/inference/reference/judge/#judgerun-and-judgeverdict) |
+| `ConsensusResult` | [Judge](/inference/reference/judge/#computeconsensus) |
+| `Match` | [Judge](/inference/reference/judge/#judgerun-and-judgeverdict) |
+| `Zone` | [Judge](/inference/reference/judge/#zonefor) |
+| `ZoneThresholds` | [Judge](/inference/reference/judge/#zonefor) |
+
+### Cost
+
+| Type | Documented in |
+|---|---|
+| `Pricing` | [Cost](/inference/reference/cost/#pricing) |
+
+### Subprocess
+
+| Type | Documented in |
+|---|---|
+| `ExecFn` | [Exec](/inference/reference/exec/#types) |
+| `ExecOptions` | [Exec](/inference/reference/exec/#types) |
+| `ExecResult` | [Exec](/inference/reference/exec/#types) |
+
+### Local models
+
+| Type | Documented in |
+|---|---|
+| `LlamaModelEntry` | [Local models](/inference/reference/local-models/#the-catalog) |
+| `LlamaTier` | [Local models](/inference/reference/local-models/#selectors-and-tiers) |
+| `LlamaSelector` | [Local models](/inference/reference/local-models/#selectors-and-tiers) |
+| `LlamaRuntime` | [Local models](/inference/reference/local-models/#the-runtime-seam) |
+| `LlamaLoadedModel` | [Local models](/inference/reference/local-models/#the-runtime-seam) |
+| `LlamaSession` | [Local models](/inference/reference/local-models/#the-runtime-seam) |
+| `LlamaPromptOptions` | [Local models](/inference/reference/local-models/#the-runtime-seam) |
+| `LlamaPromptResult` | [Local models](/inference/reference/local-models/#the-runtime-seam) |
+| `ClearLlamaModelsOptions` | [Local models](/inference/reference/local-models/#model-files-on-disk) |
+| `ClearLlamaModelsResult` | [Local models](/inference/reference/local-models/#model-files-on-disk) |
+| `ClearedModelFile` | [Local models](/inference/reference/local-models/#model-files-on-disk) |
+
+`JsonCache` is a class, not a type — see [Cache](/inference/reference/cache/#jsoncache).
+
+## Source of truth
+
+`src/types.ts` for `InferenceError`; `src/index.ts` for the export surface.

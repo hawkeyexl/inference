@@ -1,0 +1,220 @@
+---
+title: Providers reference
+description: Every ProviderSpec field, the factories, auto-detection, per-provider options, and the schema helpers.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Complete signatures for provider construction, identity resolution, and detection.
+
+For choosing among them, see [choose a provider](/inference/get-started/choose-a-provider/).
+
+## The contract
+
+Every provider satisfies this and nothing more. Widening it requires an ADR.
+
+```ts
+interface InferenceProvider {
+  provider(): string;   // stable id — feeds cache keys
+  modelName(): string;  // feeds cache keys and price lookups
+  completeJSON(req: CompleteJSONRequest): Promise<CompleteJSONResponse>;
+}
+
+interface CompleteJSONRequest {
+  system: string;
+  user: string;
+  schema: Record<string, unknown>;
+  temperature: number;
+}
+
+interface CompleteJSONResponse {
+  json: unknown;
+  usage?: TokenUsage;   // absent when the provider does not report tokens
+}
+
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+```
+
+No streaming, no multi-turn, no tool loops.
+
+## `ProviderSpec`
+
+```ts
+type ProviderName = "anthropic" | "openai" | "claude-cli" | "mock" | "llama-cpp";
+type ProviderSelector = ProviderName | "auto";
+
+interface ProviderSpec {
+  provider?: ProviderSelector;   // omit or "auto" to detect; needs makeProviderAsync
+  model?: string | null;         // null/undefined -> per-provider default
+  apiKeyEnv?: string | null;     // null/undefined -> the provider's default var
+  baseUrl?: string;              // openai only
+  command?: string;              // claude-cli only, default "claude"
+  timeoutMs?: number;            // claude-cli only, default 180000
+  pricing?: Pricing;             // not used to construct; carried so one object
+                                 // serves both makeProvider and pricingFor
+  anthropic?: AnthropicProviderOptions;
+  openai?: OpenAICompatProviderOptions;
+  llamaCpp?: LlamaCppProviderOptions;
+  exec?: ExecFn;                 // test seam for claude-cli
+  llamaRuntime?: LlamaRuntime;   // test seam for llama-cpp
+  mockResponses?: MockResponse[];
+}
+```
+
+`null` and omission are equivalent everywhere they are accepted.
+
+## Factories
+
+```ts
+function makeProvider(spec: ProviderSpec): InferenceProvider;
+function makeProviderAsync(spec: ProviderSpec): Promise<InferenceProvider>;
+function resolveProviderIdentity(spec: ProviderSpec): ProviderIdentity;
+function resolveProviderIdentityAsync(spec: ProviderSpec): Promise<ProviderIdentity>;
+
+interface ProviderIdentity {
+  provider: ProviderName;  // always concrete — never "auto"
+  model: string;
+}
+```
+
+The `resolve*` forms construct **nothing** and read no credential, so a fully-cached run needs no
+API key.
+
+**The synchronous forms throw** when `provider` is missing or `"auto"`, or when a `llama-cpp` model
+is an unresolved selector. Both cases need an `await` to resolve, and emitting a non-concrete
+identity would poison a cache key. The async forms delegate to the synchronous ones in every other
+case, so you can switch over wholesale.
+
+## Defaults
+
+```ts
+const DEFAULT_MODELS: Record<ProviderName, string>;
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+```
+
+| Provider | Default model | Default key variable |
+|---|---|---|
+| `anthropic` | `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
+| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| `claude-cli` | `claude-sonnet-4-5` | — (local CLI auth) |
+| `mock` | `mock-model` | — |
+| `llama-cpp` | `auto` | — |
+
+## Auto-detection
+
+```ts
+const DETECTION_ORDER: readonly ProviderName[];
+function detectProvider(spec?: ProviderSpec): Promise<ProviderName>;
+function availableProviders(spec?: ProviderSpec): Promise<ProviderName[]>;
+function resetProviderDetectionWarning(): void;  // test seam
+function resetClaudeCliProbe(): void;            // test seam
+```
+
+`DETECTION_ORDER` is `["anthropic", "openai", "claude-cli", "llama-cpp"]`. `mock` is deliberately
+absent — it answers `{ json: {} }` unless scripted, which would sail through as a non-error result.
+
+`detectProvider` returns the first available provider and throws an `InferenceError` naming every
+provider and why each was unavailable. `availableProviders` returns all of them, in priority order.
+
+<Aside type="caution">
+  `availableProviders()` runs every probe, including loading the llama binding (~850 ms, and it
+  initialises the backend). `detectProvider` stops at the first hit. Prefer `makeProviderAsync` on a
+  hot path.
+</Aside>
+
+Detection reads the **default** key variables and ignores a custom `apiKeyEnv`, because one field is
+shared by both API providers and a custom name cannot say which it belongs to.
+
+## Per-provider options
+
+```ts
+interface AnthropicProviderOptions {
+  toolName?: string;        // default "record_result" — this is prompt surface
+  toolDescription?: string; // default "Record the structured result."
+  maxTokens?: number;       // default 1024
+}
+
+interface OpenAICompatProviderOptions {
+  schemaName?: string;      // default "result" — also prompt surface
+}
+
+interface LlamaCppProviderOptions {
+  runtime?: LlamaRuntime;
+  thoughtTokens?: number;   // default 0 — thinking is disabled
+  maxTokens?: number;
+  modelsDirectory?: string;
+}
+```
+
+`toolName` and `schemaName` reach the model. Naming them for your domain measurably changes results.
+
+## Classes
+
+```ts
+class AnthropicProvider implements InferenceProvider {
+  constructor(model: string, apiKeyEnv: string, options?: AnthropicProviderOptions);
+}
+class OpenAICompatProvider implements InferenceProvider {
+  constructor(baseUrl: string, model: string, apiKeyEnv: string, apiKey?: string, options?: OpenAICompatProviderOptions);
+}
+class ClaudeCliProvider implements InferenceProvider {
+  constructor(model: string, command?: string, exec?: ExecFn, timeoutMs?: number);
+}
+class MockProvider implements InferenceProvider {
+  readonly requests: CompleteJSONRequest[];
+  constructor(responses: MockResponse[], model?: string);
+}
+```
+
+Prefer `makeProvider(spec)` — the classes are exported for the rare case where you already have
+concrete arguments.
+
+### Behaviors worth knowing
+
+- **`AnthropicProvider`** constrains output with a single forced tool call whose `input_schema` is
+  your schema. It throws early on `stop_reason === "max_tokens"` with an actionable message rather
+  than burning the retry on a bogus validation failure — raise `anthropic.maxTokens`.
+- **`OpenAICompatProvider`** prefers strict `json_schema`. On an error matching
+  `/response_format|json_schema|schema/i`, **or a bare `HTTP 400`**, it permanently falls back to
+  `json_object` with the schema restated in the prompt. Keyless is allowed unless `baseUrl` contains
+  `api.openai.com`.
+- **`ClaudeCliProvider`** runs `claude -p --append-system-prompt <system> --output-format json
+  --model <model>`, sends the user prompt and restated schema over **stdin**, and unwraps a
+  `{ result: string }` envelope. Reports **no usage**.
+
+## Mock
+
+```ts
+type MockResponse = { json: unknown; usage?: TokenUsage } | { error: string };
+
+function mockVerdict(
+  match: "pass" | "fail" | "partial",
+  confidence: number,
+  overrides?: Partial<{ claim: string; observed: string; reasoning: string }>,
+): { json: unknown };
+```
+
+Responses cycle when exhausted. An empty script throws. Default synthetic usage is
+`{ inputTokens: 500, outputTokens: 100 }`. `requests` records every request in order.
+
+## Schema helpers
+
+```ts
+function extractJson(content: string): unknown;
+function toStrictSchema(schema: Record<string, unknown>): Record<string, unknown>;
+function stripNulls(value: unknown): unknown;
+```
+
+`extractJson` pulls JSON out of a bare response, a fenced block, or prose; it throws when there is
+none. `toStrictSchema` rewrites a schema into OpenAI's strict subset — every property into
+`required`, optionality as a `null` type union, `additionalProperties: false` on **every** object,
+and unsupported keywords (`minLength`, `uniqueItems`) dropped. It recurses into `items` and does not
+mutate its input. `stripNulls` undoes the null-union widening on the way back.
+
+You rarely call these directly; they are exported because the `openai` provider's behavior is
+otherwise hard to reason about.

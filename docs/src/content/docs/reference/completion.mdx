@@ -1,0 +1,106 @@
+---
+title: Completion reference
+description: completeValidatedJSON, CompleteValidatedOptions, InferenceRun, and validatorFor.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The validate-and-retry wrapper around a provider call.
+
+For using it, see [structured extraction](/inference/extract/).
+
+## `completeValidatedJSON`
+
+```ts
+function completeValidatedJSON<T = unknown>(
+  options: CompleteValidatedOptions,
+): Promise<InferenceRun<T>>;
+```
+
+Calls the provider, validates the response against a schema, retries once on failure, and returns a
+run either way.
+
+**Never throws on a model failure. Never coerces a bad response into a result.**
+
+## `CompleteValidatedOptions`
+
+```ts
+interface CompleteValidatedOptions {
+  provider: InferenceProvider;
+  system: string;
+  user: string;
+  schema: Record<string, unknown>;
+  temperature?: number;        // default 0
+  attempts?: number;           // default 2 — one call plus one retry
+  validate?: ValidateFunction; // pre-compiled Ajv validator; defaults to one for `schema`
+}
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `schema` | — | Sent to the provider. Constrains generation. |
+| `validate` | derived from `schema` | Checked against the response. Supply one to validate against a **wider** schema than you requested. |
+| `temperature` | `0` | Passed through to the provider. |
+| `attempts` | `2` | Total attempts, not retries. `1` disables retrying. |
+
+<Aside type="tip" title="Why schema and validate are separate">
+  Ask the model for exactly the fields you need while accepting anything legal. See the
+  [two-schemas pattern](/inference/extract/#two-schemas-one-call).
+</Aside>
+
+## `InferenceRun`
+
+```ts
+interface InferenceRun<T = unknown> {
+  result?: T;         // absent when the run errored
+  error?: string;     // present when the run errored
+  provider: string;
+  model: string;
+  cached: boolean;
+  usage?: TokenUsage; // absent when the provider does not report tokens
+  durationMs: number;
+}
+```
+
+Exactly one of `result` and `error` is present. Check `error`, not a `try`/`catch`.
+
+Error strings take one of two shapes:
+
+- A validation failure — `Response failed schema validation: <instancePath> <message>; ...`
+- A thrown provider error, recorded verbatim.
+
+## `validatorFor`
+
+```ts
+function validatorFor(schema: Record<string, unknown>): ValidateFunction;
+```
+
+Compiles an Ajv 2020 validator for a schema and caches it in a `WeakMap` keyed on **schema object
+identity**.
+
+<Aside type="caution" title="Identity, not deep equality">
+  Two structurally identical schema objects are two cache entries. A builder that returns a fresh
+  object per call recompiles Ajv every time — memoize it. See
+  [the performance trap](/inference/extract/#the-performance-trap).
+</Aside>
+
+A **fresh Ajv instance** is created per distinct schema object, deliberately: two
+equal-but-distinct schemas sharing an `$id` would otherwise collide in a shared registry.
+
+## Retry semantics
+
+1. Call the provider. Validate the response.
+2. On a validation failure or a thrown error, try again — up to `attempts` total.
+3. After the last attempt, return a run with `error` set and `result` absent.
+
+<Aside type="caution" title="Only the successful attempt's usage is carried">
+  A request that failed on the first attempt and succeeded on the retry reports usage for **one**
+  attempt. The failed attempt's input tokens never reach a budget gate, so a ceiling built on this
+  number is soft. See [cost and budgets](/inference/judge/cost-and-budgets/).
+</Aside>
+
+## Source of truth
+
+`src/complete.ts`. Retry and validation edge cases are pinned in `test/unit/complete.test.ts`.

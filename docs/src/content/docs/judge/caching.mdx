@@ -1,0 +1,131 @@
+---
+title: Caching
+description: Make a repeat run over unchanged input free and deterministic — and make sure a stale entry can never become data.
+sidebar:
+  order: 2
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import cacheReplay from '@examples/cache-replay.mjs?raw';
+
+Turn a second run over unchanged input into a free replay.
+
+Signatures and the on-disk format are in the [cache reference](/inference/reference/cache/).
+
+## You own the key
+
+This is the whole lesson, and everything else follows from it:
+
+> This library ships **no domain prompt text and no `PROMPT_VERSION`**. `buildCacheKey` hashes the
+> parts you name. It does not decide what should invalidate an entry.
+
+That is deliberate. Every consumer has a different notion of what changed — a page body, a prompt
+revision, an ensemble size, a requested field set — and any library-chosen answer would be wrong for
+all of them.
+
+A key that is too narrow serves stale verdicts. Too wide and it never hits. Only you know which
+facts matter.
+
+## Wire it up
+
+<Code code={cacheReplay} lang="js" title="examples/cache-replay.mjs" />
+
+```text
+first cached flags: [ false, false, false ]
+second cached flags: [ true, true, true ]
+provider calls: 3
+verdicts match: true
+first cost usd: 0.009000
+replay cost usd: 0.000000
+```
+
+Three calls, not six. Identical verdicts. The replay is free.
+
+## Composing a key
+
+`buildCacheKey` takes an array of strings and returns a hash. Two properties are worth knowing:
+
+**Parts are length-prefixed before joining.** So `["a|b", "c"]` and `["a", "b|c"]` produce different
+keys. You can compose from user-controlled strings without worrying about separator collisions.
+
+**Pre-hash anything long.** Key parts should stay short, so run a page body or a document through
+`sha256` first rather than passing it whole.
+
+```ts
+const cacheKey = buildCacheKey([
+  provider.provider(),
+  provider.modelName(),
+  `v${MY_PROMPT_VERSION}`,  // your own — bump when your prompt changes
+  `r${runs}`,               // ensemble size changes the result
+  sha256(pageBody),         // pre-hash long parts
+]);
+```
+
+<Aside type="tip" title="Get the identity without a key">
+  `provider.provider()` and `provider.modelName()` need a constructed provider. If you want the key
+  before deciding whether to call out at all, use
+  [`resolveProviderIdentity`](/inference/get-started/choose-a-provider/) instead — then a fully
+  cached run never needs a credential.
+</Aside>
+
+## Reject a stale entry
+
+`JsonCache` deliberately does not know what shape you store. It handles the failures it *can* see:
+
+- An unparseable file is a **miss**, not a crash.
+- A cache hit that is not an array is a **miss** for `runEnsemble`, not a crash.
+
+What it cannot catch is an entry that is well-formed and **obsolete** — written by an older version
+of your own schema. That one replays happily.
+
+Every existing consumer of this package solved it the same way: wrap the cache and re-validate on
+read.
+
+```ts
+class VerdictCache extends JsonCache {
+  get(key) {
+    const entry = super.get(key);
+    if (!Array.isArray(entry)) return undefined;
+    // Reject entries written before your current verdict shape.
+    if (!entry.every((run) => run.verdict === undefined || isValidVerdict(run.verdict))) {
+      return undefined;
+    }
+    return entry;
+  }
+}
+```
+
+Three independent teams inventing the same wrapper is a documentation gap, not a coincidence. Use
+the pattern rather than rediscovering it.
+
+## A write failure never aborts a run
+
+> The cache is an optimization, never a dependency.
+
+A failed write warns **once per instance** — using the `label` you passed to the constructor — and
+the run continues. A read-only workspace, a full disk, or a permissions problem must not abort work
+whose inference already succeeded and was already paid for.
+
+```ts
+const cache = new JsonCache(".mytool/cache", enabled, "mytool");
+```
+
+The second argument disables the cache entirely; `get` then returns `undefined` and `set` does
+nothing.
+
+## What a replay costs
+
+Replayed runs come back flagged `cached: true`, and `costOfRuns` skips them. That is why the sample
+above prints `0.000000` for the second run. See
+[cost and budgets](/inference/judge/cost-and-budgets/).
+
+## Next
+
+- [Cost and budgets](/inference/judge/cost-and-budgets/) — what a cached run does to your ceiling
+- [Upgrading](/inference/keep-it-working/upgrading/) — what invalidates entries across a version bump
+
+{/* test {"testId":"judge-caching","description":"Cache replay: cached flags, call count, verdict stability, and zero replay cost."} */}
+{/* step {"description":"The first run misses and the second replays entirely from disk.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/cache-replay.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('first cached flags: [ false, false, false ]'),o);a.ok(o.includes('second cached flags: [ true, true, true ]'),o);"}} */}
+{/* step {"description":"The provider is called three times in total, not six.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/cache-replay.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('provider calls: 3'),o);a.ok(o.includes('verdicts match: true'),o);"}} */}
+{/* step {"description":"A replayed run is charged nothing while the original is charged normally.","runCode":{"language":"javascript","code":"const {execFileSync}=require('node:child_process');const a=require('node:assert');const o=execFileSync('node',['examples/cache-replay.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']});a.ok(o.includes('first cost usd: 0.009000'),o);a.ok(o.includes('replay cost usd: 0.000000'),o);"}} */}
+{/* test end */}

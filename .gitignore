@@ -2,3 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 .tmp/
+
+# Docs site (docs/ is its own npm workspace; dist/ and node_modules/ above already
+# cover its build output, but .astro is generated type state specific to Astro).
+docs/.astro/
+
+# Doc Detective run output. Regenerated on every run; never committed.
+.doc-detective/
+testResults-*.json

@@ -1,0 +1,67 @@
+---
+title: Glossary
+description: The vocabulary used across these docs — provider, run, verdict, consensus, zone, seam, selector, tier.
+sidebar:
+  order: 9
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Terms used across this documentation, with the page that covers each in full.
+
+<Aside type="caution" title="This page is planned">
+  Definitions are accurate but terse.
+</Aside>
+
+**Agreement** — the fraction of non-errored runs in an ensemble that voted the same way. `0` when
+every run errored. See [judge](/inference/reference/judge/#computeconsensus).
+
+**Auto-detection** — picking the highest-priority provider this machine can actually use, when none
+is named. Async, and never selects `mock`. See
+[choose a provider](/inference/get-started/choose-a-provider/#or-dont-choose).
+
+**Cache key** — a hash of the facts *you* decide should invalidate an entry. This library composes
+nothing on your behalf. See [caching](/inference/judge/caching/).
+
+**Consensus** — the aggregate of an ensemble's runs: votes, a binary verdict, agreement, and mean
+confidence. See [judge](/inference/reference/judge/#computeconsensus).
+
+**Ensemble** — N independent runs of the same question, executed sequentially. See
+[judge and consensus](/inference/judge/).
+
+**Errored run** — a run whose provider call or validation failed. It is recorded rather than
+dropped, counts against consensus, and forces `human-review`. Never a silent pass.
+
+**Identity** — a provider's `{ provider, model }` pair. Always concrete, resolvable without
+constructing anything or reading a credential. See
+[providers](/inference/reference/providers/#factories).
+
+**Inert gate** — a budget check over a model whose price is unknown. It passes unconditionally
+because the cost evaluates to `0`. Not the same as a gate that is satisfied. See
+[cost and budgets](/inference/judge/cost-and-budgets/#the-trap).
+
+**Provider** — an adapter satisfying `(system, user, schema, temperature) -> JSON`. Five exist. See
+[providers](/inference/reference/providers/).
+
+**Run** — one provider call plus its validation, recorded as an `InferenceRun` (completion layer) or
+a `JudgeRun` (judge layer). Exactly one of `result`/`verdict` and `error` is present.
+
+**Seam** — an injection point that replaces something which would otherwise leave the process:
+`MockProvider`, `ExecFn`, `LlamaRuntime`. See
+[testing your integration](/inference/keep-it-working/testing/).
+
+**Selector** — a model name that must be resolved against the machine before use: `auto`, `fast`,
+`balanced`, `quality`. Requires an async factory. See
+[choosing a model](/inference/local/choosing-a-model/).
+
+**Tier** — a size class in the curated local-model catalog: `fast`, `balanced`, `quality`. Chosen
+from available memory with a 3.5× headroom multiplier over file size.
+
+**Verdict** — a `JudgeVerdict`: claim, observed, match, confidence, reasoning. Its field
+*descriptions* are prompt surface and steer the model.
+
+**Zone** — the routing decision for a consensus: `auto-pass`, `auto-fail`, or `human-review`. The
+field to branch on. See [judge](/inference/reference/judge/#zonefor).

@@ -1,0 +1,61 @@
+---
+title: Custom verdict schema
+description: Replace the built-in verdict schema with one worded for your own domain, without losing the shape the consensus math depends on.
+sidebar:
+  order: 4
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Wording your own verdict schema and passing it through the override seam.
+
+<Aside type="caution" title="This page is planned">
+  The walkthrough is not written yet. The capability is real and shipped — everything below is
+  accurate, just briefer than it will be.
+</Aside>
+
+## The seam
+
+`EnsembleOptions.schema` replaces the built-in `VERDICT_SCHEMA` for an ensemble:
+
+```ts
+import verdictSchema from "./my-verdict-schema.json" with { type: "json" };
+
+const consensus = await judge({ provider, system, user, runs: 3, schema: verdictSchema });
+```
+
+## Why you would
+
+Field descriptions are **prompt surface**. They reach the model and measurably steer it. A `claim`
+field described in terms of documentation pages produces different verdicts than one described in
+terms of agent traces.
+
+Every production consumer of this package overrides the schema, and every one of them changes only
+`$id`, `title`, and the field **descriptions** — never the structure.
+
+## The rule
+
+Start from `VERDICT_SCHEMA`. Change `$id`, `title`, and descriptions. Leave everything else.
+
+<Aside type="danger" title="The shape contract is runtime-only">
+  An override that does not produce `JudgeVerdict`-shaped objects fails at **runtime, not compile
+  time**. The library validates responses against whatever schema you give it; it does not check
+  that your schema's shape matches `JudgeVerdict`. Drop `confidence` and you get runs that validate
+  and then break the consensus math.
+
+  Guard it with a `MockProvider` round-trip in your own test suite.
+</Aside>
+
+## Under a local model
+
+`required` is ignored, `additionalProperties` defaults to `false`, and numeric bounds are not
+grammar-enforced. A custom schema with optional fields or bounded numbers behaves differently — see
+[choosing a model](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+
+## Meanwhile
+
+- [Judge reference](/inference/reference/judge/) — `VERDICT_SCHEMA` and the `JudgeVerdict` type
+- [ADR 01001](https://github.com/hawkeyexl/inference/blob/main/adrs/01001-single-entry-point-and-canonical-verdict-schema.md) — the full reasoning, including the known hole

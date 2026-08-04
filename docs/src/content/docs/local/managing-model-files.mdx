@@ -1,0 +1,79 @@
+---
+title: Managing model files
+description: Where weights live, how to relocate them, and how to reclaim disk without destroying models something else owns.
+sidebar:
+  order: 3
+  badge:
+    text: Planned
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Finding, relocating, and safely deleting multi-gigabyte weights.
+
+<Aside type="caution" title="This page is planned">
+  The walkthrough is not written yet. Everything below is accurate, just briefer than it will be.
+</Aside>
+
+## Where weights live
+
+`~/.hawkeyexl-inference/models` — **this library's own directory**, not node-llama-cpp's shared
+`~/.node-llama-cpp/models`.
+
+The shared default is used by node-llama-cpp's own CLI and anything else on the machine, so clearing
+it could destroy weights this library never downloaded. Owning a directory removes that hazard
+instead of defending against it. The cost is that weights already sitting in the shared directory
+are downloaded again, once.
+
+The location is **per-user, not per-project**, so one copy serves every project on the machine.
+
+## Relocate it
+
+```bash
+export INFERENCE_MODELS_DIR=/mnt/models
+```
+
+Or per provider:
+
+```ts
+await makeProviderAsync({ provider: "llama-cpp", llamaCpp: { modelsDirectory: "/mnt/models" } });
+```
+
+`defaultLlamaModelsDirectory()` reports the effective value.
+
+## Preview before deleting
+
+```ts
+import { clearLlamaModels } from "@hawkeyexl/inference";
+
+const { files, freedBytes } = await clearLlamaModels({ dryRun: true });
+```
+
+Then, when you are satisfied:
+
+```ts
+await clearLlamaModels();                              // everything
+await clearLlamaModels({ models: ["gemma-4-12b"] });   // one model, all its parts
+await clearLlamaModels({ directory: "/mnt/models" });  // a non-default directory
+```
+
+## The guarantees
+
+- Only `.gguf` and `.gguf.ipull` files are ever touched.
+- Top level only. Subdirectories are never walked.
+- Loaded weights are disposed first — a memory-mapped model cannot be deleted on Windows.
+- A file held open is skipped, not forced.
+- An unknown model name is rejected rather than silently matching nothing.
+
+Interrupted `.ipull` partial downloads and every part of a split model are removed too.
+
+## Free memory without deleting
+
+`disposeLlamaModels()` releases the process-wide weight cache. Weights load once per process and are
+shared across providers naming the same model.
+
+## Meanwhile
+
+- [Local models reference](/inference/reference/local-models/) — full signatures
+- [ADR 01003](https://github.com/hawkeyexl/inference/blob/main/adrs/01003-in-process-local-models-via-node-llama-cpp.md) — why the directory is owned rather than shared
