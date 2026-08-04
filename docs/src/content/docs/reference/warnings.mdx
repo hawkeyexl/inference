@@ -1,26 +1,43 @@
 ---
 title: Warnings reference
-description: The four warnings the library writes to console.warn, when each fires, and how to reset them in tests.
+description: The five warnings the library writes to console.warn, when each fires, and how to reset them in tests.
 sidebar:
   order: 9
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The library writes to `console.warn` in exactly four places. Nothing else in the docset says so,
+The library writes to `console.warn` in exactly five places. Nothing else in the docset says so,
 which matters if your tool owns its own output formatting.
 
 Each warning fires **at most once**, but the scope of "once" differs per warning, and that catches
 people out in tests.
 
-## The four
+## The five
 
 | Warning | Fires once per | Reset with |
 |---|---|---|
+| Unsupported Node version | process | `resetNodeVersionWarning()` |
 | Nonzero judge temperature | module | `resetTemperatureWarning()` |
 | Cache write failure | **cache instance** | construct a new `JsonCache` |
 | Provider auto-selected | process | `resetProviderDetectionWarning()` |
 | Local weights not downloaded | process | `resetProviderDetectionWarning()` |
+
+### `inference: running on Node <version>, older than the Node 24 this package requires. npm only warns about that at install time (EBADENGINE), so nothing has stopped you yet — upgrade Node, or expect failures this library cannot explain.`
+
+Fires on first use — whichever of `makeProvider` or `completeValidatedJSON` you reach first — when
+`process.versions.node` reports a major version below the `>=24` in `engines`.
+
+It is a warning and not a throw because Node 24 is this package's *support* floor, not a technical
+one: nothing in `src/` uses a Node-24-only API, and the strictest dependency floor is
+`node-llama-cpp` at `>=20`. On Node 22 the library will very likely work — but it is untested
+there, and a failure that surfaces later would never mention your Node version. Refusing to run
+would break setups that currently do.
+
+<Aside type="note" title="Both entry points, one warning">
+  `makeProvider` covers consumers that go through the factory; `completeValidatedJSON` covers those
+  that construct `AnthropicProvider` and friends directly. You still hear it once.
+</Aside>
 
 ### `<label>: judge temperature is <N> — nonzero temperature adds noise to verdicts; 0 is strongly recommended.`
 
@@ -77,15 +94,21 @@ try {
 }
 ```
 
-Everything the library emits is prefixed — with `inference:` for detection, and with your `label`
-for the temperature and cache warnings — so filtering by prefix is reliable.
+Everything the library emits is prefixed — with `inference:` for detection and the Node version
+notice, and with your `label` for the temperature and cache warnings — so filtering by prefix is
+reliable.
 
 ## Resetting them in tests
 
 ```ts
-import { resetProviderDetectionWarning, resetTemperatureWarning } from "@hawkeyexl/inference";
+import {
+  resetNodeVersionWarning,
+  resetProviderDetectionWarning,
+  resetTemperatureWarning,
+} from "@hawkeyexl/inference";
 
 beforeEach(() => {
+  resetNodeVersionWarning();
   resetTemperatureWarning();
   resetProviderDetectionWarning();  // resets both detection warnings
 });
@@ -97,4 +120,4 @@ probe rather than a warning.
 
 ## Source of truth
 
-`src/judge/ensemble.ts`, `src/cache.ts`, and `src/providers/detect.ts`.
+`src/runtime.ts`, `src/judge/ensemble.ts`, `src/cache.ts`, and `src/providers/detect.ts`.

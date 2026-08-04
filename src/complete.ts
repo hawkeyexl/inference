@@ -8,6 +8,7 @@
  */
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
+import { warnIfUnsupportedNode } from "./runtime.js";
 import type { InferenceProvider, TokenUsage } from "./providers/types.js";
 
 /** One attempt at a schema-constrained completion. */
@@ -62,6 +63,9 @@ export function validatorFor(
 export async function completeValidatedJSON<T = unknown>(
   options: CompleteValidatedOptions,
 ): Promise<InferenceRun<T>> {
+  // The other half of "first use": a consumer that constructs a provider
+  // directly never touches `makeProvider`, but everything still funnels here.
+  warnIfUnsupportedNode();
   const {
     provider,
     system,

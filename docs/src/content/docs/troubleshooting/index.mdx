@@ -82,7 +82,7 @@ Everything else follows. If you have a message in hand, go straight to the
 3. **If it came back on the run, check `run.error` — not a `try`/`catch`.** A model failure never
    throws. If you are wrapping the call in `try`/`catch` and seeing nothing, this is why.
 
-4. **Look for a warning you missed.** The library writes four of them to `console.warn`, and two
+4. **Look for a warning you missed.** The library writes five of them to `console.warn`, and three
    fire exactly once per process. See the [warnings reference](/inference/reference/warnings/).
 
 5. **Check whether the failure was silent.** An errored run inside an ensemble does not surface as
@@ -106,7 +106,7 @@ else.
 
 - [Common failures](/inference/troubleshooting/common-failures/) — the ones worth prose
 - [Error reference](/inference/reference/errors/) — every message, verbatim
-- [Warnings reference](/inference/reference/warnings/) — the four `console.warn` paths
+- [Warnings reference](/inference/reference/warnings/) — the five `console.warn` paths
 - [Budgets and errors](/inference/extract/budgets-and-errors/) — how to handle each class in code
 
 {/* test {"testId":"diagnose-errors","description":"Both failure classes provoked for real, so the documented messages cannot drift."} */}
