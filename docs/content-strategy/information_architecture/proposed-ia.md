@@ -35,10 +35,13 @@ Home — "What are you building?" router + a 30-second proof
 │
 ├─ Run models locally   (Owen)   → O1, O2, O3
 │
-├─ Keep it working      (all)    → X1, U1
+├─ Keep it working      (all)    → X1, U1, X3
 │
-└─ Reference (lookup shelf)      → Providers · Completion · Judge · Cache ·
-                                    Cost · Local models · Exec · Errors & types · Glossary
+├─ When it breaks       (all)    → X2        ← entered by symptom, not by goal
+│
+└─ Reference (lookup shelf)      → Providers · Completion · Judge · Cache · Cost ·
+                                    Local models · Exec · Errors · Warnings ·
+                                    Errors & types · Glossary
 ```
 
 ### Directory mapping
@@ -50,6 +53,7 @@ Home — "What are you building?" router + a 30-second proof
 | Structured extraction | `extract/` |
 | Run models locally | `local/` |
 | Keep it working | `keep-it-working/` |
+| When it breaks | `troubleshooting/` |
 | Reference | `reference/` |
 
 Sidebar entries are `autogenerate` per directory, so adding a page to a directory adds it to the
@@ -57,7 +61,7 @@ nav. The order of the six sections is fixed in `docs/astro.config.mjs`.
 
 ## Content set
 
-Every page is justified by the CUJ it serves. **24 pages, all written.** ★ marks the pages that
+Every page is justified by the CUJ it serves. **32 pages, all written.** ★ marks the pages that
 carry an executed code sample.
 
 ### Home
@@ -80,6 +84,7 @@ carry an executed code sample.
 | `judge/index.mdx` | P1 | ★ | **Anchor.** Decision before mechanism. Ensemble → consensus → zones, with an errored run demonstrated forcing `human-review`. |
 | `judge/caching.mdx` | P2 | ★ | Key composition as the consumer's job. Replay costs nothing. The recheck-on-read pattern three consumers each invented. |
 | `judge/cost-and-budgets.mdx` | P3 | ★ | Unknown price is `undefined`; a gate over an unpriced model is **inert**, not satisfied. Overrides, and what is never charged. |
+| `judge/at-scale.mdx` | P5 | ★ | Concurrency across subjects with a bounded pool; the budget overshoot concurrency introduces, measured; the 429 → errored run → `human-review` chain; choosing `runs: N`. |
 | `judge/verdict-schema.mdx` | P4 | ★ | The `EnsembleOptions.schema` override; descriptions as prompt surface; the runtime-not-compile-time shape hole, reproduced in the sample. |
 
 ### Structured extraction (Marco)
@@ -88,6 +93,7 @@ carry an executed code sample.
 |---|---|:--:|---|
 | `extract/index.mdx` | M1 | ★ | `completeValidatedJSON`, the retry contract, the `schema`/`validate` split, and the schema-identity memoization trap. No judge-layer vocabulary anywhere on this page. |
 | `extract/budgets-and-errors.mdx` | M2 | ★ | Operational vs model failure, `InferenceError` translation, the soft ceiling shown as five calls made and three charged. |
+| `extract/cli-integration.mdx` | M4 | ★ | Per-subject statuses, exit codes 0/1/2, a dry run the cache makes free, skip-before-spend keys, confidence gating. |
 | `extract/subprocess-seam.mdx` | M3 | ★ | `realExec` as a general-purpose helper; argv not shell; stdin over argv; `env: undefined` unsets; timer-based timeout. |
 
 ### Run models locally (Owen)
@@ -103,7 +109,15 @@ carry an executed code sample.
 | Page | CUJ | ★ | Notes |
 |---|---|:--:|---|
 | `keep-it-working/testing.mdx` | X1 | ★ | The three seams — `MockProvider`, `ExecFn`, `LlamaRuntime`. Failure paths as the point. Closes by showing how this docset tests itself. |
+| `keep-it-working/boundary.mdx` | X3 | | What the library owns versus what stays in your repo, and the reimplement-a-provider anti-pattern all three consumers warned themselves about. |
 | `keep-it-working/upgrading.mdx` | U1 | ★ | `JudgeRun` as a file format; what the library can and cannot invalidate; release channels; the recheck-on-read wrapper demonstrated. |
+
+### When it breaks (all personas)
+
+| Page | CUJ | ★ | Notes |
+|---|---|:--:|---|
+| `troubleshooting/index.mdx` | X2 | ★ | The diagnosis journey. Organised by symptom rather than by goal: did it throw, or did it come back on `run.error`? |
+| `troubleshooting/common-failures.mdx` | X2 | | The seven failures worth prose — no provider available, a selector in a sync factory, a CLI that is not logged in, a model answering in prose, an unsatisfiable schema, a 429, an inert budget. |
 
 ### Reference (lookup shelf — supports every journey)
 
@@ -115,6 +129,8 @@ carry an executed code sample.
 | `reference/cache.mdx` | P2, U1 | ★ | `JsonCache` constructor arity, `buildCacheKey`, `sha256`, and the on-disk file format. |
 | `reference/cost.mdx` | P3, M2 | ★ | `PRICE_TABLE` contents, `pricingFor` resolution order, `costOfUsage`, `costOfRuns`, `Pricing`. |
 | `reference/local-models.mdx` | O1, O2, O3 | ★ | The catalog, tiers and selectors, `LlamaCppProviderOptions`, `LlamaRuntime`, `clearLlamaModels`, `disposeLlamaModels`. |
+| `reference/errors.mdx` | X2 | | Every message the library can throw, verbatim, with trigger and fix. Gated against `src/` by `check-error-coverage.mjs`. |
+| `reference/warnings.mdx` | X2 | | The four `console.warn` paths, their once-per scope, and the reset seams. |
 | `reference/exec.mdx` | M3 | | `realExec`, `ExecFn`, `ExecOptions`, `ExecResult`, and the two distinct default timeouts. |
 | `reference/errors-and-types.mdx` | all | | `InferenceError`, and the complete exported type index, each row linking to the page that documents it. |
 | `reference/glossary.mdx` | all | | Provider, run, verdict, consensus, zone, ensemble, selector, tier, seam. |
@@ -126,6 +142,7 @@ carry an executed code sample.
 | `README.md` | Rin | ★ | Slimmed to a router: hook, install, one quickstart, provider table, links into the site. Depth moves to pages. |
 | `CLAUDE.md` | contributors | ★ | Pointer block into `docs/content-strategy/`, naming the personas and CUJ codes. Points; does not inline. |
 | `adrs/01005-*` | contributors | ★ | The three re-litigable trade-offs behind this docset. |
+| `404.md` | all | | Routes a bad URL into the troubleshooting track. Starlight's injected 404 route is disabled so the catch-all builds it without a conflict warning. |
 | `examples/*.mjs` | all | ★ | The runnable samples. Rendered into pages by `?raw` import; executed in CI. |
 
 ## Source-of-truth mapping
@@ -153,7 +170,7 @@ Two sources are contracts in their own right and outrank prose in the source fil
 
 ## Status
 
-All 24 pages are written and all 14 CUJs are walkable end to end. Fifteen pages carry executed code
+All 32 pages are written and all 18 CUJs are walkable end to end. Fifteen pages carry executed code
 samples; the Reference shelf and the glossary are lookup content and carry none.
 
 Remaining work, none of it blocking:

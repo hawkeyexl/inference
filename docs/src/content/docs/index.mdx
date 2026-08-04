@@ -77,8 +77,10 @@ because every consumer pays for surface area added here.
 
 ## Before you start
 
-- **Node 24 or later.** Hard requirement.
-- **ESM only.** There is no CommonJS build.
+- **Node 24 or later**, declared in `engines` — an older version gets an `EBADENGINE` warning, not a
+  refusal.
+- **ESM only.** `require()` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`; from CommonJS,
+  [use a dynamic import](/inference/get-started/#requirements).
 - Three runtime dependencies, plus one optional peer dependency for local models.
 
 ```bash

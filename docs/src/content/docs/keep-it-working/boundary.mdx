@@ -1,0 +1,86 @@
+---
+title: What stays in your repo
+description: Which side of the library a piece of code belongs on, and the one anti-pattern that keeps recurring.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A short page about a decision you will make in your first week and then repeatedly.
+
+## The principle
+
+> **The library owns what is identical across consumers. You own what is specific to your domain.**
+
+Everything below follows from that, and the principle is more useful than the list — the list will
+always be incomplete.
+
+## The split
+
+| The library owns | You own |
+|---|---|
+| Talking to a provider | Your prompts, and their versioning |
+| Validating a response, and the retry | Your schema, and its wording |
+| Counting votes, computing agreement | What a verdict means in your domain |
+| Zone routing | What each zone does in your product |
+| The cache **mechanism** | What goes in the **key** |
+| Pricing tokens | Your budget policy |
+| One subject at a time | Concurrency, retries, batching |
+| A flat `ProviderSpec` | Mapping your config onto it |
+
+## Why this page exists
+
+All three production consumers independently wrote a version of the same rule into their own
+contributor instructions:
+
+> Never reimplement a provider, ensemble, cache, or price table here; three copies of that code
+> drifted apart once already, and a fix belongs upstream.
+
+That sentence exists three times, in three repositories, **because the library never said it**.
+
+It is not a hypothetical. This package exists *because* the same code had been copied into three
+projects and drifted — each copy holding a fix the others lacked. One had the Windows argv limit
+solved, another had the non-throwing cache write, a third had the OpenAI strict-mode fallback. The
+extraction was the fix. The boundary is the whole reason the package exists.
+
+<Aside type="danger" title="The specific anti-pattern">
+  If you find yourself writing a provider adapter, an ensemble loop, a cache implementation, or a
+  price table **inside your own repository**, stop. That is how the fourth divergent copy starts,
+  and nobody notices until a fix lands in one of them.
+</Aside>
+
+## What to do instead
+
+**If the fix is in a provider, the ensemble, the cache, or the price table** — it belongs upstream.
+Open an issue or a PR against this package. Every consumer gets it, including the three that already
+exist.
+
+**If you need behavior the contract does not offer** — say so upstream before working around it. The
+provider contract is deliberately narrow, and widening it
+[requires an ADR](https://github.com/hawkeyexl/inference/tree/main/adrs), but "deliberately narrow"
+is not the same as "closed."
+
+**If it is domain-specific** — it is yours, and the library will not try to take it. There is no
+`PROMPT_VERSION` here, no domain prompt text, no opinion about what invalidates your cache entries.
+Those absences are deliberate.
+
+## The four you definitely own
+
+Worth naming, because each is somewhere a reader expects the library to help and it deliberately
+does not:
+
+1. **Prompts and their versioning.** Ship no prompt text, hold no `PROMPT_VERSION`. See
+   [caching](/inference/judge/caching/#you-own-the-key).
+2. **Verdict wording.** The structure is the library's; the field descriptions are yours, and they
+   are [prompt surface](/inference/judge/verdict-schema/).
+3. **Orchestration.** Concurrency, backoff, per-subject status. See
+   [running at scale](/inference/judge/at-scale/).
+4. **Config mapping.** `ProviderSpec` is flat and library-owned so it never has to know about your
+   config format. Map onto it; do not pass your config object through. See
+   [choosing a provider](/inference/get-started/choose-a-provider/#the-spec).
+
+## Next
+
+- [Upgrading](/inference/keep-it-working/upgrading/) — what a version bump does to what you own
+- [Testing your integration](/inference/keep-it-working/testing/) — the seams for the parts you own

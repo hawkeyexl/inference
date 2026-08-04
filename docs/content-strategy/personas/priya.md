@@ -42,6 +42,10 @@ journeys:
   - cuj-cost-gate-and-degrade
   - cuj-test-without-network
   - cuj-upgrade-safely
+  - cuj-run-at-scale
+  - cuj-wire-into-a-cli
+  - cuj-diagnose-a-failed-run
+  - cuj-know-the-boundary
 ---
 
 **Priya is the lead persona.** She maintains an eval CLI that grades artifacts — pages, traces,

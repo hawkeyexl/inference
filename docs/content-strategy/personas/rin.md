@@ -32,6 +32,8 @@ journeys:
   - cuj-first-validated-call
   - cuj-choose-a-provider
   - cuj-test-without-network
+  - cuj-diagnose-a-failed-run
+  - cuj-know-the-boundary
 ---
 
 Rin maintains a Node tool and has a feature in mind that needs a model. No integration exists yet.

@@ -113,6 +113,37 @@ const cache = new JsonCache(".mytool/cache", enabled, "mytool");
 The second argument disables the cache entirely; `get` then returns `undefined` and `set` does
 nothing.
 
+## Where the cache lives
+
+`JsonCache` takes a directory and makes no assumptions about it. The layout every existing consumer
+converged on:
+
+```text
+.mytool/
+├── cache/          # the judge cache
+└── cache/fill/     # a separate cache for the extraction command
+```
+
+A dot-directory named after your tool, and **one subdirectory per command**.
+
+<Aside type="caution" title="Never let two commands share a cache">
+  Different commands have different key schemes and different value shapes. A judge cache and a fill
+  cache must never be read into each other — the entries deserialize into the wrong type and the
+  failure is silent, because `JsonCache` deliberately does not know what you store.
+</Aside>
+
+Gitignore it, and mind the anchoring:
+
+```text
+# Depth-agnostic on purpose. A leading-path pattern like `.mytool/cache/` is
+# anchored to this file's directory, so a run inside test/fixtures/ would leak
+# its cache into a tracked fixture. `**/` matches wherever the command ran.
+**/.mytool/
+```
+
+That comment is a scar from a real repository. A command run from a subdirectory creates its cache
+*there*, and an anchored pattern does not catch it.
+
 ## What a replay costs
 
 Replayed runs come back flagged `cached: true`, and `costOfRuns` skips them. That is why the sample

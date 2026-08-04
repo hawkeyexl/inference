@@ -1,0 +1,162 @@
+---
+title: Common failures
+description: The handful of failures worth more than a table row — what causes each and what to do.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Seven failures that account for most of the trouble, each with more context than the
+[error reference](/inference/reference/errors/) can give in a row.
+
+## No provider is available
+
+```text
+No inference provider is available. Tried:
+  anthropic: ANTHROPIC_API_KEY is not set
+  openai: OPENAI_API_KEY is not set and no baseUrl was given
+  claude-cli: could not run `claude` (is the Claude CLI installed?)
+  llama-cpp: node-llama-cpp is not installed (npm i node-llama-cpp)
+```
+
+**This is the most likely first failure**, because the zero-config path is the one we recommend. You
+called `makeProviderAsync({})` on a machine with no credentials and no local runtime, so every probe
+failed.
+
+Any one of these fixes it:
+
+| Fix | Cost |
+|---|---|
+| `export ANTHROPIC_API_KEY=…` or `OPENAI_API_KEY=…` | an account |
+| Point `baseUrl` at a local OpenAI-compatible server | a running server, no key |
+| Install and log into the Claude CLI | an existing Claude subscription |
+| `npm install node-llama-cpp` | a few GB of disk, no account |
+
+The last row is the one people miss: it needs **no credential at all**. See
+[run models locally](/inference/local/).
+
+<Aside type="note">
+  Detection never selects `mock`, so `not auto-selectable` in the list is expected rather than a
+  problem. `mock` answers `{}` unless scripted, which would pass as a real result.
+</Aside>
+
+## A selector reached a synchronous factory
+
+```text
+llama-cpp model "auto" is a selector and cannot be resolved synchronously — picking a tier probes
+GPU memory. Use resolveProviderIdentityAsync/makeProviderAsync, or name a concrete model.
+```
+
+`makeProvider({ provider: "llama-cpp" })` throws, because the **default model is `auto`** and
+resolving it reads GPU memory.
+
+```js
+// throws
+const provider = makeProvider({ provider: "llama-cpp" });
+
+// works
+const provider = await makeProviderAsync({ provider: "llama-cpp" });
+```
+
+The refusal is deliberate rather than a limitation: recording the literal `"auto"` as cache-key
+material would let a 2.62 GB and a 6.72 GB model share cached results, and make one key mean
+different things on two machines.
+
+`makeProviderAsync` delegates to `makeProvider` for every other provider, so switching wholesale is
+safe.
+
+## The Claude CLI is there but not logged in
+
+```text
+Claude CLI exited 1: <the last 300 characters of stderr>
+```
+
+The stderr tail is included because it carries the real reason, and "not logged in" is by far the
+most common one.
+
+**Check it directly:**
+
+```bash
+claude --version   # is it installed and on PATH?
+claude -p "hi"     # are you authenticated?
+```
+
+If the first fails you will see `Failed to run claude: ENOENT` instead — a different error with a
+different fix (install it, or set `command` to its path).
+
+## A model that answers in prose
+
+```text
+Response contained no parseable JSON object
+```
+
+The provider got a reply with no JSON in it — no bare object, no fenced block, nothing embedded in
+prose. Shared by `openai`, `claude-cli`, and `llama-cpp`, since all three parse text rather than
+receiving native structured output.
+
+Usually the system prompt. Ask for the object directly and give the model nothing else to do. If it
+persists, `anthropic` constrains output with a forced tool call and cannot answer in prose at all.
+
+## A schema the model cannot satisfy
+
+```text
+Response failed schema validation:  must have required property 'summary'; …
+```
+
+Two attempts, both rejected by Ajv. Before blaming the model, check the schema is expressible:
+deeply nested objects, long `enum` lists, and tight `pattern` constraints are all common causes.
+
+<Aside type="caution" title="On a local model, check this first">
+  Under grammar-constrained decoding `required` is ignored, `additionalProperties` defaults to
+  `false`, and numeric bounds are not enforced. A schema that works against a hosted provider can
+  fail here for reasons that have nothing to do with the prompt. See
+  [what changes under a grammar](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+</Aside>
+
+## A 429 that does not look like one
+
+A rate limit arrives as an ordinary errored run — `429 rate limited`, or whatever your provider
+returns — and an errored run
+[forces `human-review`](/inference/judge/#the-exact-boundaries).
+
+So the symptom is **a growing human-review queue**, not an error. It reads like the model becoming
+less certain, which invites tuning thresholds instead of backing off the request rate.
+
+If your review pile grew right after you raised concurrency, that is this. See
+[running at scale](/inference/judge/at-scale/#what-a-429-actually-becomes).
+
+## A budget that is not being enforced
+
+Your `maxCostUsd` never trips and spend keeps climbing.
+
+The gate is almost certainly **inert** rather than satisfied: `pricingFor` returned `undefined`, so
+every cost is `0` and every comparison passes.
+
+```js
+const pricing = pricingFor(provider.modelName(), config.pricing);
+if (pricing === undefined) warn(`no price for ${provider.modelName()} — the budget gate is inert`);
+```
+
+Three roads lead here: a hosted model absent from the price table, `claude-cli` (which reports no
+token usage at all), and any local model. Full detail in
+[cost and budgets](/inference/judge/cost-and-budgets/#the-trap).
+
+## Something ran twice that should have been cached
+
+Cache misses that should be hits usually come down to one of three things:
+
+1. **Both `cache` and `cacheKey` are required.** The cache is consulted only when you pass both.
+2. **A fresh schema object per call** defeats `validatorFor`'s identity-keyed cache — a different
+   problem with the same smell. See
+   [the performance trap](/inference/extract/#the-performance-trap).
+3. **A resolved selector changed the model name.** Weights cached under `auto` on a small machine
+   will not be hit on a larger one, because the key names the concrete model that ran. That is the
+   async factory working as intended.
+
+## Still stuck
+
+- [Error reference](/inference/reference/errors/) — every message, verbatim
+- [Warnings reference](/inference/reference/warnings/) — what the library logs, and when
+- [Open an issue](https://github.com/hawkeyexl/inference/issues) — include the exact message and
+  which provider you were on

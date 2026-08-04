@@ -22,6 +22,11 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "@hawkeyexl/inference",
+      // We author our own 404 at src/content/docs/404.md. Starlight's injected /404
+      // route would render the same entry, and Astro then warns that the catch-all
+      // `/[...slug]` conflicts with it. Disabling the injected route lets the catch-all
+      // build /404.html from our entry alone — same output, no warning.
+      disable404Route: true,
       description:
         "Schema-constrained LLM completion across four providers, with caching, cost accounting, and an LLM-as-judge ensemble.",
       social: [
@@ -37,6 +42,7 @@ export default defineConfig({
         { label: "Structured extraction", items: [{ autogenerate: { directory: "extract" } }] },
         { label: "Run models locally", items: [{ autogenerate: { directory: "local" } }] },
         { label: "Keep it working", items: [{ autogenerate: { directory: "keep-it-working" } }] },
+        { label: "When it breaks", items: [{ autogenerate: { directory: "troubleshooting" } }] },
         { label: "Reference", items: [{ autogenerate: { directory: "reference" } }] },
       ],
     }),
