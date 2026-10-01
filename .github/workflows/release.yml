@@ -1,10 +1,16 @@
 # Release pipeline (mirrors dockg's / docmeta's). Manual-only until the
-# one-time setup is done:
-#   1. Create/install the release GitHub App and add RELEASE_APP_ID /
-#      RELEASE_APP_PRIVATE_KEY secrets (see docmeta docs/maintainers/releasing.md).
-#   2. Configure npm OIDC trusted publishing for this repo + workflow file,
-#      or add an NPM_TOKEN secret and set it on the Release step.
-# Then replace `workflow_dispatch` with push-branch triggers.
+# one-time setup is done and a dispatched run has succeeded:
+#   1. Install the release GitHub App (the one docmeta uses) on this repo with
+#      Contents, Issues and Pull requests read & write, and add its
+#      RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY secrets.
+#   2. On npmjs.com, add a GitHub Actions trusted publisher for
+#      @hawkeyexl/inference: owner hawkeyexl, repo inference, workflow
+#      release.yml. npm checks the provenance against package.json's
+#      repository.url, so the two must name the same repo.
+# semantic-release reads the last release from git tags, so every published
+# version needs its v* tag on the remote; without one it computes 1.0.0.
+# Then replace `workflow_dispatch` with push triggers for the branches in
+# .releaserc.json (main, next, feat/**).
 name: Release
 
 on:
