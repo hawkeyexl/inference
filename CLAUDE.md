@@ -186,7 +186,9 @@ future reader would otherwise re-litigate.
 
 ## Releases
 
-semantic-release, conventional commits, `.releaserc.json` channels matching dockg's. The release
-workflow is `workflow_dispatch`-only until the release GitHub App secrets and npm trusted
-publishing are configured — see the header comment in
+semantic-release, conventional commits, `.releaserc.json` channels matching dockg's. Every push to
+`main`, `next`, or `feat/**` runs the release workflow; npm publishing goes through OIDC trusted
+publishing, with provenance. semantic-release finds the last version from `v*` tags on the remote,
+so never publish by hand (`npm version` + `npm publish`) — a version without its pushed tag makes
+the next run recompute from scratch. Prerequisites are in the header comment of
 [.github/workflows/release.yml](.github/workflows/release.yml).

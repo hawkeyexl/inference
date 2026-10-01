@@ -1,19 +1,22 @@
-# Release pipeline (mirrors dockg's / docmeta's). Manual-only until the
-# one-time setup is done and a dispatched run has succeeded:
-#   1. Install the release GitHub App (the one docmeta uses) on this repo with
-#      Contents, Issues and Pull requests read & write, and add its
-#      RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY secrets.
-#   2. On npmjs.com, add a GitHub Actions trusted publisher for
-#      @hawkeyexl/inference: owner hawkeyexl, repo inference, workflow
-#      release.yml. npm checks the provenance against package.json's
-#      repository.url, so the two must name the same repo.
+# Release pipeline (mirrors dockg's / docmeta's). Runs on every push to a
+# branch .releaserc.json releases from; workflow_dispatch stays for re-runs.
+# Prerequisites, all in place as of 0.3.2:
+#   - The release GitHub App is installed here with Contents, Issues and Pull
+#     requests read & write; RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY are set.
+#   - npm trusted publishing for @hawkeyexl/inference names owner hawkeyexl,
+#     repo inference, workflow release.yml. npm checks the provenance against
+#     package.json's repository.url, so the two must name the same repo.
 # semantic-release reads the last release from git tags, so every published
 # version needs its v* tag on the remote; without one it computes 1.0.0.
-# Then replace `workflow_dispatch` with push triggers for the branches in
-# .releaserc.json (main, next, feat/**).
+# The release commit carries [skip ci], so it does not re-trigger this file.
 name: Release
 
 on:
+  push:
+    branches:
+      - main
+      - next
+      - "feat/**"
   workflow_dispatch:
 
 concurrency:
