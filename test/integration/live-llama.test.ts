@@ -12,14 +12,20 @@
  */
 import { describe, expect, it, afterAll } from "vitest";
 import {
+  InferenceError,
   LLAMA_MODELS,
+  LlamaCppProvider,
   costOfRuns,
+  defaultLlamaModelsDirectory,
+  defaultLlamaRuntime,
   disposeLlamaModels,
   judge,
   makeProviderAsync,
   pricingFor,
+  resolveLlamaModelRef,
   resolveProviderIdentityAsync,
 } from "../../src/index.js";
+import type { LlamaRuntime } from "../../src/index.js";
 
 const live = process.env["INFERENCE_LIVE_LLAMA"] ? describe : describe.skip;
 
@@ -103,6 +109,92 @@ live("live llama-cpp provider", () => {
     expect(Array.isArray(json.animals)).toBe(true);
     expect(json.animals?.length).toBeGreaterThan(0);
   }, TIMEOUT);
+
+  // The memory bug: node-llama-cpp's own default sizes the context to free
+  // memory, which reserved all 131072 trained tokens of granite-4.1-3b-q2 on
+  // CPU — about 11 GB for a one-field prompt. Recorded here from the context
+  // the real binding actually created, not from the size the provider asked
+  // for. ADR 01011.
+  describe("context size, against the real binding", () => {
+    /** The real runtime, recording each session's created context size. */
+    function recordingRuntime(): { runtime: LlamaRuntime; sizes: number[] } {
+      const sizes: number[] = [];
+      const real = defaultLlamaRuntime();
+      const runtime: LlamaRuntime = {
+        ...real,
+        async loadModel(path) {
+          const model = await real.loadModel(path);
+          return {
+            ...model,
+            async createSession(systemPrompt, contextSize) {
+              const session = await model.createSession(systemPrompt, contextSize);
+              if (session.contextSize != null) sizes.push(session.contextSize);
+              return session;
+            },
+          };
+        },
+      };
+      return { runtime, sizes };
+    }
+
+    it("creates at most 8192 tokens of context for a small prompt", async () => {
+      // Loaded weights are shared process-wide, so an earlier test's model
+      // would bypass this runtime's createSession. Start from none.
+      await disposeLlamaModels();
+      const { runtime, sizes } = recordingRuntime();
+      const provider = new LlamaCppProvider("granite-4.1-3b-q2", { runtime });
+      const result = await provider.completeJSON({
+        system: "Propose a value for the one missing metadata field.",
+        user: "# Choosing a model\n\nWhat auto picks, and how to override it.",
+        schema: {
+          type: "object",
+          properties: { title: { type: "string" } },
+          required: ["title"],
+          additionalProperties: false,
+        },
+        temperature: 0,
+      });
+      expect(typeof (result.json as { title?: unknown }).title).toBe("string");
+      expect(sizes).toHaveLength(1);
+      expect(sizes[0]).toBeGreaterThan(0);
+      expect(sizes[0]).toBeLessThanOrEqual(8192);
+    }, TIMEOUT);
+
+    it("reports the trained context and counts tokens with the model's tokenizer", async () => {
+      const real = defaultLlamaRuntime();
+      const path = await real.resolveModelFile(
+        resolveLlamaModelRef("granite-4.1-3b-q2"),
+        defaultLlamaModelsDirectory(),
+      );
+      const model = await real.loadModel(path);
+      try {
+        expect(model.trainContextSize).toBe(131_072);
+        const count = model.countTokens?.("The cat sat on the mat.");
+        expect(count).toBeGreaterThan(0);
+        expect(count).toBeLessThan(20);
+      } finally {
+        await model.dispose();
+      }
+    }, TIMEOUT);
+
+    it("refuses a prompt longer than the trained context instead of truncating it", async () => {
+      await disposeLlamaModels();
+      const { runtime, sizes } = recordingRuntime();
+      const provider = new LlamaCppProvider("granite-4.1-3b-q2", { runtime });
+      const error: unknown = await provider
+        .completeJSON({
+          system: "Summarise.",
+          // Comfortably past 131072 tokens with any tokenizer.
+          user: "The cat sat on the mat. ".repeat(40_000),
+          schema: { type: "object", properties: { s: { type: "string" } } },
+          temperature: 0,
+        })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(InferenceError);
+      expect((error as Error).message).toMatch(/training context of 131072 tokens/);
+      expect(sizes).toEqual([]);
+    }, TIMEOUT);
+  });
 
   it("runs a 3-run ensemble that costs nothing", async () => {
     const provider = await makeProviderAsync({
