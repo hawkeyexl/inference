@@ -53,11 +53,32 @@ export interface LlamaPromptResult {
 export interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
   dispose(): Promise<void>;
+  /**
+   * Tokens of context the runtime actually created. llama.cpp may round a
+   * requested size up to a multiple of 256. Optional: a fake has no context.
+   */
+  readonly contextSize?: number;
 }
 
 export interface LlamaLoadedModel {
-  createSession(systemPrompt: string): Promise<LlamaSession>;
+  /**
+   * Open a single-turn session on a fresh context of `contextSize` tokens.
+   * The provider always passes it, sized from the prompt it is about to send;
+   * the real runtime treats an absent size as the 8192-token default.
+   */
+  createSession(systemPrompt: string, contextSize?: number): Promise<LlamaSession>;
   dispose(): Promise<void>;
+  /**
+   * The context length the model was trained on, the most a context can
+   * usefully hold. Optional so a runtime written before it existed still
+   * satisfies the seam; without it the provider assumes no ceiling.
+   */
+  readonly trainContextSize?: number;
+  /**
+   * Count `text` in this model's own tokens. Optional for the same reason;
+   * without it the provider uses the default size and cannot check fit.
+   */
+  countTokens?(text: string): number;
 }
 
 /**
@@ -89,6 +110,15 @@ export interface LlamaCppProviderOptions {
    */
   thoughtTokens?: number;
   maxTokens?: number;
+  /**
+   * A fixed context size in tokens, used for every call.
+   *
+   * Unset, the context is sized to the work: 8192 tokens, or more when the
+   * prompt and its response reserve need it, up to the model's training
+   * context. Either way, a prompt that does not fit fails with an
+   * `InferenceError` rather than being truncated. ADR 01011.
+   */
+  contextSize?: number;
   /**
    * Where to download and look for weights. Defaults to this library's own
    * directory — see `defaultLlamaModelsDirectory`.
@@ -122,11 +152,30 @@ export async function disposeLlamaModels(): Promise<void> {
   );
 }
 
+/**
+ * The context a call gets when its prompt fits. node-llama-cpp's own default is
+ * the largest context free memory allows, up to the training context: 131072
+ * tokens and about 11 GB for granite-4.1-3b-q2 on CPU, for prompts of a few
+ * thousand tokens. Bounded instead, so memory follows the work. ADR 01011.
+ */
+const DEFAULT_CONTEXT_SIZE = 8192;
+
+/**
+ * Room for what the token count of the two prompts does not see: the chat
+ * template's role markers and separators. The grammar itself takes no context;
+ * the schema restated in the system prompt does, and is counted there.
+ */
+const CHAT_TEMPLATE_OVERHEAD_TOKENS = 512;
+
+/** Room for the response when `maxTokens` does not bound it. */
+const DEFAULT_RESPONSE_RESERVE_TOKENS = 2048;
+
 export class LlamaCppProvider implements InferenceProvider {
   private readonly uri: string;
   private readonly runtime: LlamaRuntime;
   private readonly thoughtTokens: number;
   private readonly maxTokens: number | undefined;
+  private readonly contextSize: number | undefined;
   private readonly modelsDirectory: string;
   /**
    * Loaded-model key: the same URI in two directories is two different files.
@@ -147,6 +196,16 @@ export class LlamaCppProvider implements InferenceProvider {
           `makeProviderAsync to resolve a selector against this machine.`,
       );
     }
+    if (
+      options.contextSize !== undefined &&
+      !(Number.isInteger(options.contextSize) && options.contextSize > 0)
+    ) {
+      throw new InferenceError(
+        `llamaCpp.contextSize must be a positive integer number of tokens, ` +
+          `got ${String(options.contextSize)}.`,
+      );
+    }
+    this.contextSize = options.contextSize;
     this.uri = resolveLlamaModelRef(model);
     this.runtime = options.runtime ?? defaultLlamaRuntime();
     this.thoughtTokens = options.thoughtTokens ?? 0;
@@ -166,21 +225,41 @@ export class LlamaCppProvider implements InferenceProvider {
 
   async completeJSON(req: CompleteJSONRequest): Promise<CompleteJSONResponse> {
     const model = await this.load();
+    const systemPrompt = systemPromptFor(req);
     // A fresh session per call: the contract is single-shot, and reusing one
-    // would leak the previous run's turns into this one's context.
-    const session = await model.createSession(systemPromptFor(req));
+    // would leak the previous run's turns into this one's context. Its context
+    // is created here, where the prompt is known, so it is sized to the prompt.
+    const plan = this.contextFor(model, systemPrompt, req.user);
+    const session = await model.createSession(systemPrompt, plan.contextSize);
+    // With no maxTokens, the response is capped at the room the context has
+    // left. Uncapped, a long answer fills the context and node-llama-cpp shifts
+    // the prompt out of it to keep going; capped, it stops at maxTokens and the
+    // guard below reports it. ADR 01011.
+    const contextSize = session.contextSize ?? plan.contextSize;
+    const implicitMaxTokens =
+      this.maxTokens == null && plan.promptTokens != null
+        ? contextSize - plan.promptTokens
+        : undefined;
+    const maxTokens = this.maxTokens ?? implicitMaxTokens;
     try {
       const result = await session.prompt(req.user, {
         schema: req.schema,
         temperature: req.temperature,
         thoughtTokens: this.thoughtTokens,
-        ...(this.maxTokens != null ? { maxTokens: this.maxTokens } : {}),
+        ...(maxTokens != null ? { maxTokens } : {}),
       });
       // A run cut off at the token or context limit leaves truncated JSON.
       // Without this it surfaces as "failed schema validation" — or worse,
       // extractJson's brace-slicing fallback salvages a wrong-but-parseable
       // object — and the retry burns another full local inference to fail the
       // same way. Same guard as the Anthropic provider's max_tokens check.
+      if (result.stopReason === "maxTokens" && implicitMaxTokens != null) {
+        throw new Error(
+          `llama-cpp generation filled the ${contextSize}-token context before ` +
+            `completing the JSON — raise llamaCpp.contextSize, or set ` +
+            `llamaCpp.maxTokens to bound the response.`,
+        );
+      }
       if (result.stopReason === "maxTokens") {
         throw new Error(
           `llama-cpp generation hit the token limit before completing the JSON` +
@@ -192,6 +271,57 @@ export class LlamaCppProvider implements InferenceProvider {
     } finally {
       await session.dispose().catch(() => undefined);
     }
+  }
+
+  /**
+   * The context this call needs: both prompts in the model's own tokens, the
+   * chat template's overhead, and room for the response. A prompt that does not
+   * fit is refused here, before anything is created. llama.cpp would otherwise
+   * shift the overflow out of the context and answer a prompt nobody sent.
+   */
+  private contextFor(
+    model: LlamaLoadedModel,
+    systemPrompt: string,
+    user: string,
+  ): { contextSize: number; promptTokens?: number } {
+    const ceiling = model.trainContextSize;
+    const fallback =
+      this.contextSize ??
+      (ceiling != null
+        ? Math.min(DEFAULT_CONTEXT_SIZE, ceiling)
+        : DEFAULT_CONTEXT_SIZE);
+    if (!model.countTokens) return { contextSize: fallback };
+
+    const system = model.countTokens(systemPrompt);
+    const prompt = model.countTokens(user);
+    const response =
+      (this.maxTokens ?? DEFAULT_RESPONSE_RESERVE_TOKENS) + this.thoughtTokens;
+    const promptTokens = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS;
+    const needed = promptTokens + response;
+    const counted =
+      `Counted: system ${system} + user ${prompt} + ` +
+      `${CHAT_TEMPLATE_OVERHEAD_TOKENS} chat-template overhead + ` +
+      `${response} for the response.`;
+
+    if (this.contextSize != null) {
+      if (needed > this.contextSize) {
+        throw new InferenceError(
+          `llama-cpp prompt needs ${needed} tokens of context, more than ` +
+            `llamaCpp.contextSize (${this.contextSize}). ${counted} Raise ` +
+            `llamaCpp.contextSize, ${this.maxTokens != null ? "lower" : "set"} ` +
+            `llamaCpp.maxTokens, or leave contextSize unset so the context is sized to the prompt.`,
+        );
+      }
+      return { contextSize: this.contextSize, promptTokens };
+    }
+    if (ceiling != null && needed > ceiling) {
+      throw new InferenceError(
+        `llama-cpp prompt needs ${needed} tokens of context, more than this ` +
+          `model's training context of ${ceiling} tokens. ${counted} Shorten the ` +
+          `prompt${this.maxTokens != null ? ", or lower llamaCpp.maxTokens" : ""}.`,
+      );
+    }
+    return { contextSize: Math.max(fallback, needed), promptTokens };
   }
 
   private load(): Promise<LlamaLoadedModel> {
@@ -334,14 +464,21 @@ async function loadNodeLlamaCpp(): Promise<LlamaRuntime> {
     async loadModel(path) {
       const model = await llama.loadModel({ modelPath: path });
       return {
-        async createSession(systemPrompt) {
-          const context = await model.createContext();
+        trainContextSize: model.trainContextSize,
+        countTokens: (text) => model.tokenize(text).length,
+        async createSession(systemPrompt, contextSize) {
+          // Always an explicit size. Left out, node-llama-cpp sizes the context
+          // to free memory, which is the bug ADR 01011 records.
+          const context = await model.createContext({
+            contextSize: contextSize ?? DEFAULT_CONTEXT_SIZE,
+          });
           const sequence = context.getSequence();
           const session = new LlamaChatSession({
             contextSequence: sequence,
             systemPrompt,
           });
           return {
+            contextSize: context.contextSize,
             async prompt(text, options) {
               const grammar = await llama.createGrammarForJsonSchema(
                 options.schema as Parameters<

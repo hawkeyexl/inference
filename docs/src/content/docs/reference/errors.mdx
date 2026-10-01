@@ -169,6 +169,14 @@ The same cause reaching a different entry point — `resolveLlamaModelRef`, and 
 
 **Fix:** `await makeProviderAsync({ provider: "llama-cpp" })`.
 
+### `llamaCpp.contextSize must be a positive integer number of tokens, got <X>.`
+
+`llamaCpp.contextSize` was zero, negative, fractional, or not a number. Thrown when the provider is
+constructed.
+
+**Fix:** pass a whole number of tokens, such as `8192`, or leave it unset so each context is sized to
+its prompt.
+
 ### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, mock, llama-cpp.`
 
 A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
@@ -244,6 +252,36 @@ The response came back without the forced tool call. Rare; usually a refusal.
 The local-model equivalent of the above.
 
 **Fix:** raise `llamaCpp.maxTokens`, or shorten the prompt.
+
+### `llama-cpp generation filled the <S>-token context before completing the JSON — raise llamaCpp.contextSize, or set llamaCpp.maxTokens to bound the response.`
+
+With `maxTokens` unset, the response may use whatever room the context has left after the prompt,
+and no more. The answer ran past that room. Uncapped, llama.cpp would have shifted the prompt out of
+the context to keep generating, and the rest of the answer would follow a prompt you did not send.
+
+**Fix:** raise `llamaCpp.contextSize` so the context holds a longer answer, or set
+`llamaCpp.maxTokens` to bound the response and size the context around it.
+
+### `llama-cpp prompt needs <N> tokens of context, more than this model's training context of <T> tokens. Counted: …`
+
+The prompt does not fit the largest context the model supports. `<N>` is the system prompt with its
+restated schema, plus the user prompt, plus 512 tokens of chat-template overhead, plus room for the
+response: `maxTokens`, or 2048 when it is unset, plus `thoughtTokens`. The message lists each count.
+
+Nothing is generated. Sending the prompt anyway would make llama.cpp shift its start out of the
+context, and the model would answer a prompt you did not send. Called directly, `completeJSON`
+throws this as an `InferenceError`.
+
+**Fix:** shorten the prompt, lower `llamaCpp.maxTokens` if you set it, or use a model trained on a
+longer context.
+
+### `llama-cpp prompt needs <N> tokens of context, more than llamaCpp.contextSize (<S>). Counted: …`
+
+The same count, against the fixed size you set with `llamaCpp.contextSize`.
+
+**Fix:** raise `llamaCpp.contextSize`, or set `llamaCpp.maxTokens` to shrink the response reserve,
+or leave `contextSize` unset so each context is sized to its prompt. A fixed size below about 2600
+tokens holds no prompt at all until `maxTokens` is set, because the default reserve is 2048.
 
 ### `Failed to run <cmd>: <spawnError> (is the Claude CLI installed?)`
 

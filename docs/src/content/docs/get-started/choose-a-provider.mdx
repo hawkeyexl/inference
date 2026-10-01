@@ -104,7 +104,7 @@ interface ProviderSpec {
   pricing?: Pricing;           // override the built-in price table
   anthropic?: AnthropicProviderOptions;   // toolName, toolDescription, maxTokens
   openai?: OpenAICompatProviderOptions;   // schemaName
-  llamaCpp?: LlamaCppProviderOptions;     // thoughtTokens, maxTokens, modelsDirectory
+  llamaCpp?: LlamaCppProviderOptions;     // thoughtTokens, maxTokens, contextSize, modelsDirectory
   exec?: ExecFn;               // test seam for claude-cli
   llamaRuntime?: LlamaRuntime; // test seam for llama-cpp
   mockResponses?: MockResponse[];

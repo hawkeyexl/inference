@@ -147,11 +147,15 @@ interface LlamaCppProviderOptions {
   runtime?: LlamaRuntime;
   thoughtTokens?: number;   // default 0 — thinking is disabled
   maxTokens?: number;
+  contextSize?: number;     // default: sized to each prompt, 8192 tokens at least
   modelsDirectory?: string;
 }
 ```
 
 `toolName` and `schemaName` reach the model. Naming them for your domain measurably changes results.
+
+`contextSize` fixes the local model's context, and with it most of the memory a call takes. See
+[context size](/inference/reference/local-models/#context-size).
 
 ## Classes
 

@@ -37,6 +37,25 @@ sizing off VRAM alone would leave most of the machine idle.
 A model needs **3.5× its file size** in that budget. Tiers are walked smallest to largest, and the
 result floors at `fast` — you always get something.
 
+## What a call costs in memory
+
+The weights are one part. The context is the other: each call gets its own, sized to its prompt.
+It is 8192 tokens unless the prompt and its response need more, and never more than the model was
+trained on. On `granite-4.1-3b-q2`, a call with a 4000-token prompt peaks at about 2.85 GB on CPU.
+
+To pin the size, on a machine you share with other jobs say, set `contextSize`:
+
+```ts
+await makeProviderAsync({
+  provider: "llama-cpp",
+  llamaCpp: { contextSize: 4096, maxTokens: 512 },
+});
+```
+
+A prompt that does not fit is refused with an error that lists its token counts, never truncated.
+The sizing rule and the messages are in the
+[local models reference](/inference/reference/local-models/#context-size).
+
 ## Inspect before you download
 
 The catalog is exported, so you can see sizes and licenses before triggering a multi-gigabyte

@@ -123,13 +123,16 @@ interface LlamaRuntime {
 }
 
 interface LlamaLoadedModel {
-  createSession(systemPrompt: string): Promise<LlamaSession>;
+  createSession(systemPrompt: string, contextSize?: number): Promise<LlamaSession>;
   dispose(): Promise<void>;
+  readonly trainContextSize?: number;   // the model's training context, in tokens
+  countTokens?(text: string): number;   // the model's own tokenizer
 }
 
 interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
   dispose(): Promise<void>;
+  readonly contextSize?: number;   // tokens of context actually created
 }
 
 interface LlamaPromptOptions {
@@ -158,6 +161,12 @@ no GPU. See [testing your integration](/inference/keep-it-working/testing/).
 `getMemoryBudgetBytes` returns `max(free VRAM, totalmem() / 2)`, falling back to `totalmem() / 2`
 when the GPU probe fails.
 
+The provider passes `createSession` the context size it computed for the prompt. The real runtime
+creates exactly that many tokens of context, rounded up to a multiple of 256 by llama.cpp, and 8192
+when no size is passed. `trainContextSize` and `countTokens` are optional, so a fake written without
+them still satisfies the interface. Without `countTokens`, the provider uses the 8192-token default
+and does not check that the prompt fits.
+
 ## `LlamaCppProvider`
 
 ```ts
@@ -169,6 +178,7 @@ interface LlamaCppProviderOptions {
   runtime?: LlamaRuntime;
   thoughtTokens?: number;   // default 0
   maxTokens?: number;
+  contextSize?: number;     // default: sized to each prompt, 8192 tokens at least
   modelsDirectory?: string;
 }
 ```
@@ -176,6 +186,35 @@ interface LlamaCppProviderOptions {
 A fresh session per call — the contract is single-shot. The schema is compiled to a GBNF grammar
 **and** restated in the system prompt, because the grammar hides descriptions from the model.
 Truncation at `maxTokens` is reported as an error naming the limit rather than a validation failure.
+
+### Context size
+
+Each call gets a fresh context, sized once the prompt is known. The context is most of what a call
+costs in memory beyond the weights, so this is the number that decides whether a run fits a machine.
+
+The provider counts the tokens the call needs with the model's own tokenizer:
+
+| Part | Tokens |
+|---|---|
+| System prompt, with the schema restated | counted |
+| User prompt | counted |
+| Chat-template overhead | 512 |
+| Response | `maxTokens`, or 2048 when unset, plus `thoughtTokens` |
+
+| `contextSize` | Context created | When the call does not fit |
+|---|---|---|
+| unset (default) | 8192 tokens, or the count when it is larger, up to the model's training context | error naming the training context |
+| a number | exactly that many tokens | error naming `llamaCpp.contextSize` |
+
+A call that does not fit is never sent, because llama.cpp would shift the start of the prompt out of
+the context. It fails with an `InferenceError`, which `completeValidatedJSON` and `judge` record on
+`run.error`. The messages are in the [error reference](/inference/reference/errors/).
+
+Earlier releases let node-llama-cpp choose the size, and it chose the largest context free
+memory allowed. For `granite-4.1-3b-q2`, trained on 131072 tokens, a one-field prompt of about 4000
+tokens took 12.9 GB on CPU. With the 8192-token default the same call takes 2.85 GB.
+[ADR 01011](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01011-size-the-local-context-to-the-prompt.md)
+records the measurements and the options weighed.
 
 ## Getting the runtime
 

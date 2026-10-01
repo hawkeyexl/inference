@@ -23,6 +23,7 @@ import {
   defaultLlamaModelsDirectory,
   disposeLlamaModels,
   isModelDownloaded,
+  makeProviderAsync,
 } from "../../src/index.js";
 import type {
   CompleteJSONRequest,
@@ -53,11 +54,20 @@ interface Recorded {
   loadedPaths: string[];
   prompts: { text: string; options: LlamaPromptOptions }[];
   systemPrompts: string[];
+  contextSizes: number[];
 }
+
+/**
+ * The fake tokenizer: one token per four characters, rounded up. Real counts
+ * come from the model's own tokenizer; the sizing tests only need a count the
+ * test can reproduce.
+ */
+const fakeTokens = (text: string): number => Math.ceil(text.length / 4);
 
 /** A LlamaRuntime that never touches the network, the filesystem, or a GPU. */
 function fakeRuntime(
   responses: (string | Error)[] = ['{"match":"pass","confidence":0.9}'],
+  { trainContextSize = 131_072 }: { trainContextSize?: number } = {},
 ): { runtime: LlamaRuntime; recorded: Recorded } {
   const recorded: Recorded = {
     resolvedUris: [],
@@ -65,6 +75,7 @@ function fakeRuntime(
     loadedPaths: [],
     prompts: [],
     systemPrompts: [],
+    contextSizes: [],
   };
   let call = 0;
   const runtime: LlamaRuntime = {
@@ -76,9 +87,13 @@ function fakeRuntime(
     loadModel(path) {
       recorded.loadedPaths.push(path);
       return Promise.resolve({
-        createSession(systemPrompt) {
+        trainContextSize,
+        countTokens: fakeTokens,
+        createSession(systemPrompt, contextSize) {
           recorded.systemPrompts.push(systemPrompt);
+          if (contextSize != null) recorded.contextSizes.push(contextSize);
           return Promise.resolve({
+            contextSize,
             prompt(text, options) {
               recorded.prompts.push({ text, options });
               const next = responses[call++ % responses.length]!;
@@ -274,6 +289,242 @@ describe("model lifecycle", () => {
       /out of memory/,
     );
     expect(attempts).toBe(2);
+  });
+});
+
+describe("context sizing", () => {
+  // node-llama-cpp's default context is the largest that free memory allows,
+  // up to the model's training context. For granite-4.1-3b-q2 on CPU that was
+  // all 131072 tokens — about 11 GB for a prompt of a few thousand — which
+  // OOM-killed 16 GB CI runners. ADR 01011.
+
+  /** What the provider reserves for a call, with the fake tokenizer. */
+  function needed(
+    req: CompleteJSONRequest,
+    systemPrompt: string,
+    { maxTokens, thoughtTokens = 0 }: { maxTokens?: number; thoughtTokens?: number } = {},
+  ): number {
+    return (
+      fakeTokens(systemPrompt) +
+      fakeTokens(req.user) +
+      512 +
+      (maxTokens ?? 2048) +
+      thoughtTokens
+    );
+  }
+
+  it("creates an 8192-token context for a prompt that fits, whatever memory is free", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    await new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([8192]);
+  });
+
+  it("caps an unbounded response at the room left in the context", async () => {
+    // Without a cap, a long answer fills the bounded context and node-llama-cpp
+    // shifts the prompt out of it to keep generating. Capping at the room left
+    // turns that into a maxTokens stop, which the truncation guard reports.
+    const { runtime, recorded } = fakeRuntime();
+    await new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST);
+    const system = recorded.systemPrompts[0]!;
+    const promptTokens = fakeTokens(system) + fakeTokens(REQUEST.user) + 512;
+    expect(recorded.prompts[0]!.options.maxTokens).toBe(8192 - promptTokens);
+  });
+
+  it("leaves an explicit maxTokens as given", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    await new LlamaCppProvider("gemma-4-e4b", { runtime, maxTokens: 300 }).completeJSON(
+      REQUEST,
+    );
+    expect(recorded.prompts[0]!.options.maxTokens).toBe(300);
+  });
+
+  it("names the context, not maxTokens, when the context cut the response off", async () => {
+    const runtime: LlamaRuntime = {
+      resolveModelFile: (uri) => Promise.resolve(uri),
+      loadModel: () =>
+        Promise.resolve({
+          trainContextSize: 131_072,
+          countTokens: fakeTokens,
+          createSession: (_system: string, contextSize?: number) =>
+            Promise.resolve({
+              contextSize,
+              prompt: () =>
+                Promise.resolve({
+                  text: '{"match":"pass","confid',
+                  stopReason: "maxTokens",
+                  usage: { inputTokens: 10, outputTokens: 8 },
+                }),
+              dispose: () => Promise.resolve(),
+            }),
+          dispose: () => Promise.resolve(),
+        }),
+      getMemoryBudgetBytes: () => Promise.resolve(0),
+    };
+    await expect(
+      new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST),
+    ).rejects.toThrow(/filled the 8192-token context.*llamaCpp\.contextSize/s);
+  });
+
+  it("never asks for more than the model was trained on", async () => {
+    const { runtime, recorded } = fakeRuntime(undefined, {
+      trainContextSize: 4096,
+    });
+    await new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([4096]);
+  });
+
+  it("sizes the context up to fit a prompt the default cannot hold", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const req = { ...REQUEST, user: "x".repeat(4 * 20_000) };
+    await new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(req);
+    const size = recorded.contextSizes[0]!;
+    expect(size).toBe(needed(req, recorded.systemPrompts[0]!));
+    expect(size).toBeGreaterThan(8192);
+    expect(size).toBeLessThan(131_072);
+  });
+
+  it("reserves maxTokens and the thinking budget for the response", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const req = { ...REQUEST, user: "x".repeat(4 * 20_000) };
+    await new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      maxTokens: 6000,
+      thoughtTokens: 1000,
+    }).completeJSON(req);
+    expect(recorded.contextSizes[0]).toBe(
+      needed(req, recorded.systemPrompts[0]!, {
+        maxTokens: 6000,
+        thoughtTokens: 1000,
+      }),
+    );
+  });
+
+  it("fails with an InferenceError, before generating, when the training context is too small", async () => {
+    const { runtime, recorded } = fakeRuntime(undefined, {
+      trainContextSize: 8192,
+    });
+    const req = { ...REQUEST, user: "x".repeat(4 * 20_000) };
+    const provider = new LlamaCppProvider("gemma-4-e4b", { runtime });
+    const error: unknown = await provider.completeJSON(req).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InferenceError);
+    expect((error as Error).message).toMatch(
+      /needs \d+ tokens of context, more than this model's training context of 8192 tokens/,
+    );
+    // Nothing was created, so nothing was silently truncated.
+    expect(recorded.contextSizes).toEqual([]);
+    expect(recorded.prompts).toEqual([]);
+  });
+
+  it("records the oversized prompt as an errored run, never a result", async () => {
+    const { runtime } = fakeRuntime(undefined, { trainContextSize: 8192 });
+    const run = await completeValidatedJSON({
+      provider: new LlamaCppProvider("gemma-4-e4b", { runtime }),
+      system: REQUEST.system,
+      user: "x".repeat(4 * 20_000),
+      schema: REQUEST.schema,
+    });
+    expect(run.result).toBeUndefined();
+    expect(run.error).toMatch(/training context of 8192 tokens/);
+  });
+
+  it.each([4096, 32_768])(
+    "uses an explicit contextSize of %i as given, whatever the default",
+    async (contextSize) => {
+      const { runtime, recorded } = fakeRuntime();
+      await new LlamaCppProvider("gemma-4-e4b", {
+        runtime,
+        contextSize,
+      }).completeJSON(REQUEST);
+      expect(recorded.contextSizes).toEqual([contextSize]);
+    },
+  );
+
+  it("fits a small explicit contextSize when maxTokens bounds the response", async () => {
+    // Unbounded, the response is reserved 2048 tokens, so a 2048-token context
+    // can never hold a prompt as well. maxTokens is what makes it fit.
+    const { runtime, recorded } = fakeRuntime();
+    const provider = new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 2048,
+    });
+    await expect(provider.completeJSON(REQUEST)).rejects.toThrow(
+      /set llamaCpp\.maxTokens/,
+    );
+    await disposeLlamaModels();
+    await new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 2048,
+      maxTokens: 512,
+    }).completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([2048]);
+  });
+
+  it("fails with an InferenceError when the prompt does not fit an explicit contextSize", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const req = { ...REQUEST, user: "x".repeat(4 * 20_000) };
+    const provider = new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 8192,
+    });
+    const error: unknown = await provider.completeJSON(req).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InferenceError);
+    expect((error as Error).message).toMatch(
+      /needs \d+ tokens of context, more than llamaCpp\.contextSize \(8192\)/,
+    );
+    expect(recorded.contextSizes).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    "rejects contextSize %s at construction",
+    (contextSize) => {
+      const { runtime } = fakeRuntime();
+      expect(
+        () => new LlamaCppProvider("gemma-4-e4b", { runtime, contextSize }),
+      ).toThrow(InferenceError);
+      expect(
+        () => new LlamaCppProvider("gemma-4-e4b", { runtime, contextSize }),
+      ).toThrow(/llamaCpp\.contextSize must be a positive integer/);
+    },
+  );
+
+  it("passes llamaCpp.contextSize through makeProviderAsync", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const provider = await makeProviderAsync({
+      provider: "llama-cpp",
+      model: "gemma-4-e4b",
+      llamaRuntime: runtime,
+      llamaCpp: { contextSize: 4096 },
+    });
+    await provider.completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([4096]);
+  });
+
+  it("still works with a runtime that cannot count tokens", async () => {
+    // A LlamaRuntime written before the tokenizer and training size joined the
+    // seam — every fake in a consumer's suite. It gets the default size and
+    // no fit check, which is all a runtime with no real context can use.
+    const sizes: number[] = [];
+    const runtime: LlamaRuntime = {
+      resolveModelFile: (uri) => Promise.resolve(uri),
+      loadModel: () =>
+        Promise.resolve({
+          createSession: (_system: string, contextSize?: number) => {
+            if (contextSize != null) sizes.push(contextSize);
+            return Promise.resolve({
+              prompt: () =>
+                Promise.resolve({ text: '{"match":"pass","confidence":0.9}' }),
+              dispose: () => Promise.resolve(),
+            });
+          },
+          dispose: () => Promise.resolve(),
+        }),
+      getMemoryBudgetBytes: () => Promise.resolve(0),
+    };
+    const result = await new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+    }).completeJSON({ ...REQUEST, user: "x".repeat(4 * 20_000) });
+    expect(result.json).toEqual({ match: "pass", confidence: 0.9 });
+    expect(sizes).toEqual([8192]);
   });
 });
 
