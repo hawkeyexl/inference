@@ -2,7 +2,7 @@
  * Live local-model check. Skipped unless INFERENCE_LIVE_LLAMA is set, so the
  * default suite stays offline — no network in tests is a hard rule here.
  *
- * The first run downloads the `fast` tier (~2.6 GB) to this library's own models
+ * The first run downloads the `fast` tier (~1.4 GB) to this library's own models
  * directory (`defaultLlamaModelsDirectory()`, overridable with
  * `INFERENCE_MODELS_DIR`) and needs `node-llama-cpp` installed, since it is an
  * optional peer dependency:
@@ -15,6 +15,7 @@ import {
   InferenceError,
   LLAMA_MODELS,
   LlamaCppProvider,
+  aliasForTier,
   costOfRuns,
   defaultLlamaModelsDirectory,
   defaultLlamaRuntime,
@@ -58,7 +59,9 @@ live("live llama-cpp provider", () => {
       provider: "llama-cpp",
       model: "fast",
     });
-    expect(provider.modelName()).toBe("gemma-4-e2b");
+    // The tier's alias, not a literal: ADR 01009 retiered the catalog and a
+    // hard-coded name went stale without failing anything run by default.
+    expect(provider.modelName()).toBe(aliasForTier("fast"));
 
     const consensus = await judge({
       provider,
