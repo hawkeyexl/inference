@@ -19,6 +19,10 @@ steps:
     doc: /local/choosing-a-model/
     exists: true
     note: The 3.5x headroom multiplier over file size, walking tiers smallest to largest and flooring at fast. A table from measured budget to the tier that results.
+  - stage: Know what a call costs in memory
+    doc: /local/choosing-a-model/
+    exists: true
+    note: Each call's context is sized to its prompt, 8192 tokens unless the prompt needs more, capped at the training context. contextSize pins it. A prompt that does not fit is refused, never truncated. ADR 01011.
   - stage: Read the catalog before downloading
     doc: /local/choosing-a-model/
     exists: true
