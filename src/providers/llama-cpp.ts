@@ -111,6 +111,15 @@ export interface LlamaCppProviderOptions {
   thoughtTokens?: number;
   maxTokens?: number;
   /**
+   * A fixed context size in tokens, used for every call.
+   *
+   * Unset, the context is sized to the work: 8192 tokens, or more when the
+   * prompt and its response reserve need it, up to the model's training
+   * context. Either way, a prompt that does not fit fails with an
+   * `InferenceError` rather than being truncated. ADR 01011.
+   */
+  contextSize?: number;
+  /**
    * Where to download and look for weights. Defaults to this library's own
    * directory — see `defaultLlamaModelsDirectory`.
    */
@@ -166,6 +175,7 @@ export class LlamaCppProvider implements InferenceProvider {
   private readonly runtime: LlamaRuntime;
   private readonly thoughtTokens: number;
   private readonly maxTokens: number | undefined;
+  private readonly contextSize: number | undefined;
   private readonly modelsDirectory: string;
   /**
    * Loaded-model key: the same URI in two directories is two different files.
@@ -186,6 +196,16 @@ export class LlamaCppProvider implements InferenceProvider {
           `makeProviderAsync to resolve a selector against this machine.`,
       );
     }
+    if (
+      options.contextSize !== undefined &&
+      !(Number.isInteger(options.contextSize) && options.contextSize > 0)
+    ) {
+      throw new InferenceError(
+        `llamaCpp.contextSize must be a positive integer number of tokens, ` +
+          `got ${String(options.contextSize)}.`,
+      );
+    }
+    this.contextSize = options.contextSize;
     this.uri = resolveLlamaModelRef(model);
     this.runtime = options.runtime ?? defaultLlamaRuntime();
     this.thoughtTokens = options.thoughtTokens ?? 0;
@@ -251,9 +271,10 @@ export class LlamaCppProvider implements InferenceProvider {
   ): number {
     const ceiling = model.trainContextSize;
     const fallback =
-      ceiling != null
+      this.contextSize ??
+      (ceiling != null
         ? Math.min(DEFAULT_CONTEXT_SIZE, ceiling)
-        : DEFAULT_CONTEXT_SIZE;
+        : DEFAULT_CONTEXT_SIZE);
     if (!model.countTokens) return fallback;
 
     const system = model.countTokens(systemPrompt);
@@ -266,6 +287,17 @@ export class LlamaCppProvider implements InferenceProvider {
       `${CHAT_TEMPLATE_OVERHEAD_TOKENS} chat-template overhead + ` +
       `${response} for the response.`;
 
+    if (this.contextSize != null) {
+      if (needed > this.contextSize) {
+        throw new InferenceError(
+          `llama-cpp prompt needs ${needed} tokens of context, more than ` +
+            `llamaCpp.contextSize (${this.contextSize}). ${counted} Raise ` +
+            `llamaCpp.contextSize, ${this.maxTokens != null ? "lower" : "set"} ` +
+            `llamaCpp.maxTokens, or leave contextSize unset so the context is sized to the prompt.`,
+        );
+      }
+      return this.contextSize;
+    }
     if (ceiling != null && needed > ceiling) {
       throw new InferenceError(
         `llama-cpp prompt needs ${needed} tokens of context, more than this ` +

@@ -23,6 +23,7 @@ import {
   defaultLlamaModelsDirectory,
   disposeLlamaModels,
   isModelDownloaded,
+  makeProviderAsync,
 } from "../../src/index.js";
 import type {
   CompleteJSONRequest,
@@ -378,6 +379,78 @@ describe("context sizing", () => {
     });
     expect(run.result).toBeUndefined();
     expect(run.error).toMatch(/training context of 8192 tokens/);
+  });
+
+  it.each([4096, 32_768])(
+    "uses an explicit contextSize of %i as given, whatever the default",
+    async (contextSize) => {
+      const { runtime, recorded } = fakeRuntime();
+      await new LlamaCppProvider("gemma-4-e4b", {
+        runtime,
+        contextSize,
+      }).completeJSON(REQUEST);
+      expect(recorded.contextSizes).toEqual([contextSize]);
+    },
+  );
+
+  it("fits a small explicit contextSize when maxTokens bounds the response", async () => {
+    // Unbounded, the response is reserved 2048 tokens, so a 2048-token context
+    // can never hold a prompt as well. maxTokens is what makes it fit.
+    const { runtime, recorded } = fakeRuntime();
+    const provider = new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 2048,
+    });
+    await expect(provider.completeJSON(REQUEST)).rejects.toThrow(
+      /set llamaCpp\.maxTokens/,
+    );
+    await disposeLlamaModels();
+    await new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 2048,
+      maxTokens: 512,
+    }).completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([2048]);
+  });
+
+  it("fails with an InferenceError when the prompt does not fit an explicit contextSize", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const req = { ...REQUEST, user: "x".repeat(4 * 20_000) };
+    const provider = new LlamaCppProvider("gemma-4-e4b", {
+      runtime,
+      contextSize: 8192,
+    });
+    const error: unknown = await provider.completeJSON(req).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InferenceError);
+    expect((error as Error).message).toMatch(
+      /needs \d+ tokens of context, more than llamaCpp\.contextSize \(8192\)/,
+    );
+    expect(recorded.contextSizes).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    "rejects contextSize %s at construction",
+    (contextSize) => {
+      const { runtime } = fakeRuntime();
+      expect(
+        () => new LlamaCppProvider("gemma-4-e4b", { runtime, contextSize }),
+      ).toThrow(InferenceError);
+      expect(
+        () => new LlamaCppProvider("gemma-4-e4b", { runtime, contextSize }),
+      ).toThrow(/llamaCpp\.contextSize must be a positive integer/);
+    },
+  );
+
+  it("passes llamaCpp.contextSize through makeProviderAsync", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    const provider = await makeProviderAsync({
+      provider: "llama-cpp",
+      model: "gemma-4-e4b",
+      llamaRuntime: runtime,
+      llamaCpp: { contextSize: 4096 },
+    });
+    await provider.completeJSON(REQUEST);
+    expect(recorded.contextSizes).toEqual([4096]);
   });
 
   it("still works with a runtime that cannot count tokens", async () => {
