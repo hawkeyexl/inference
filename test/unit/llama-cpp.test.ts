@@ -319,6 +319,52 @@ describe("context sizing", () => {
     expect(recorded.contextSizes).toEqual([8192]);
   });
 
+  it("caps an unbounded response at the room left in the context", async () => {
+    // Without a cap, a long answer fills the bounded context and node-llama-cpp
+    // shifts the prompt out of it to keep generating. Capping at the room left
+    // turns that into a maxTokens stop, which the truncation guard reports.
+    const { runtime, recorded } = fakeRuntime();
+    await new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST);
+    const system = recorded.systemPrompts[0]!;
+    const promptTokens = fakeTokens(system) + fakeTokens(REQUEST.user) + 512;
+    expect(recorded.prompts[0]!.options.maxTokens).toBe(8192 - promptTokens);
+  });
+
+  it("leaves an explicit maxTokens as given", async () => {
+    const { runtime, recorded } = fakeRuntime();
+    await new LlamaCppProvider("gemma-4-e4b", { runtime, maxTokens: 300 }).completeJSON(
+      REQUEST,
+    );
+    expect(recorded.prompts[0]!.options.maxTokens).toBe(300);
+  });
+
+  it("names the context, not maxTokens, when the context cut the response off", async () => {
+    const runtime: LlamaRuntime = {
+      resolveModelFile: (uri) => Promise.resolve(uri),
+      loadModel: () =>
+        Promise.resolve({
+          trainContextSize: 131_072,
+          countTokens: fakeTokens,
+          createSession: (_system: string, contextSize?: number) =>
+            Promise.resolve({
+              contextSize,
+              prompt: () =>
+                Promise.resolve({
+                  text: '{"match":"pass","confid',
+                  stopReason: "maxTokens",
+                  usage: { inputTokens: 10, outputTokens: 8 },
+                }),
+              dispose: () => Promise.resolve(),
+            }),
+          dispose: () => Promise.resolve(),
+        }),
+      getMemoryBudgetBytes: () => Promise.resolve(0),
+    };
+    await expect(
+      new LlamaCppProvider("gemma-4-e4b", { runtime }).completeJSON(REQUEST),
+    ).rejects.toThrow(/filled the 8192-token context.*llamaCpp\.contextSize/s);
+  });
+
   it("never asks for more than the model was trained on", async () => {
     const { runtime, recorded } = fakeRuntime(undefined, {
       trainContextSize: 4096,

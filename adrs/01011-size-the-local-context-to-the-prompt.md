@@ -75,6 +75,12 @@ Tokens are counted with the model's own tokenizer. Then:
 The size is always passed as a number. With a number, node-llama-cpp throws when memory cannot hold
 the context, rather than silently shrinking it as `"auto"` and `{ max }` do.
 
+With `maxTokens` unset, the response is capped at the room the context has left after the prompt:
+the context created, less the system and user prompts and the 512-token overhead. A bounded context
+makes an uncapped response dangerous in a way the old 131072-token context hid. A long answer would
+fill it, and node-llama-cpp would shift the prompt out to keep generating. Capped, generation stops
+at `maxTokens`, and the error names the context and `llamaCpp.contextSize`.
+
 The 512 tokens of overhead is a margin, not a measurement. granite-4.1-3b-q2's chat template added 12
 tokens to the measured call above. Other templates add more, and some prepend a default system
 message. The grammar itself takes no context, and the schema restated in the system prompt is

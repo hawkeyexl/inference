@@ -229,22 +229,37 @@ export class LlamaCppProvider implements InferenceProvider {
     // A fresh session per call: the contract is single-shot, and reusing one
     // would leak the previous run's turns into this one's context. Its context
     // is created here, where the prompt is known, so it is sized to the prompt.
-    const session = await model.createSession(
-      systemPrompt,
-      this.contextSizeFor(model, systemPrompt, req.user),
-    );
+    const plan = this.contextFor(model, systemPrompt, req.user);
+    const session = await model.createSession(systemPrompt, plan.contextSize);
+    // With no maxTokens, the response is capped at the room the context has
+    // left. Uncapped, a long answer fills the context and node-llama-cpp shifts
+    // the prompt out of it to keep going; capped, it stops at maxTokens and the
+    // guard below reports it. ADR 01011.
+    const contextSize = session.contextSize ?? plan.contextSize;
+    const implicitMaxTokens =
+      this.maxTokens == null && plan.promptTokens != null
+        ? contextSize - plan.promptTokens
+        : undefined;
+    const maxTokens = this.maxTokens ?? implicitMaxTokens;
     try {
       const result = await session.prompt(req.user, {
         schema: req.schema,
         temperature: req.temperature,
         thoughtTokens: this.thoughtTokens,
-        ...(this.maxTokens != null ? { maxTokens: this.maxTokens } : {}),
+        ...(maxTokens != null ? { maxTokens } : {}),
       });
       // A run cut off at the token or context limit leaves truncated JSON.
       // Without this it surfaces as "failed schema validation" — or worse,
       // extractJson's brace-slicing fallback salvages a wrong-but-parseable
       // object — and the retry burns another full local inference to fail the
       // same way. Same guard as the Anthropic provider's max_tokens check.
+      if (result.stopReason === "maxTokens" && implicitMaxTokens != null) {
+        throw new Error(
+          `llama-cpp generation filled the ${contextSize}-token context before ` +
+            `completing the JSON — raise llamaCpp.contextSize, or set ` +
+            `llamaCpp.maxTokens to bound the response.`,
+        );
+      }
       if (result.stopReason === "maxTokens") {
         throw new Error(
           `llama-cpp generation hit the token limit before completing the JSON` +
@@ -264,24 +279,25 @@ export class LlamaCppProvider implements InferenceProvider {
    * fit is refused here, before anything is created. llama.cpp would otherwise
    * shift the overflow out of the context and answer a prompt nobody sent.
    */
-  private contextSizeFor(
+  private contextFor(
     model: LlamaLoadedModel,
     systemPrompt: string,
     user: string,
-  ): number {
+  ): { contextSize: number; promptTokens?: number } {
     const ceiling = model.trainContextSize;
     const fallback =
       this.contextSize ??
       (ceiling != null
         ? Math.min(DEFAULT_CONTEXT_SIZE, ceiling)
         : DEFAULT_CONTEXT_SIZE);
-    if (!model.countTokens) return fallback;
+    if (!model.countTokens) return { contextSize: fallback };
 
     const system = model.countTokens(systemPrompt);
     const prompt = model.countTokens(user);
     const response =
       (this.maxTokens ?? DEFAULT_RESPONSE_RESERVE_TOKENS) + this.thoughtTokens;
-    const needed = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS + response;
+    const promptTokens = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS;
+    const needed = promptTokens + response;
     const counted =
       `Counted: system ${system} + user ${prompt} + ` +
       `${CHAT_TEMPLATE_OVERHEAD_TOKENS} chat-template overhead + ` +
@@ -296,7 +312,7 @@ export class LlamaCppProvider implements InferenceProvider {
             `llamaCpp.maxTokens, or leave contextSize unset so the context is sized to the prompt.`,
         );
       }
-      return this.contextSize;
+      return { contextSize: this.contextSize, promptTokens };
     }
     if (ceiling != null && needed > ceiling) {
       throw new InferenceError(
@@ -305,7 +321,7 @@ export class LlamaCppProvider implements InferenceProvider {
           `prompt${this.maxTokens != null ? ", or lower llamaCpp.maxTokens" : ""}.`,
       );
     }
-    return Math.max(fallback, needed);
+    return { contextSize: Math.max(fallback, needed), promptTokens };
   }
 
   private load(): Promise<LlamaLoadedModel> {
