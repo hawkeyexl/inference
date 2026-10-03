@@ -26,7 +26,11 @@ import { detectProvider, warnPendingDownload } from "./detect.js";
 import type { AnthropicProviderOptions } from "./anthropic.js";
 import type { OpenAICompatProviderOptions } from "./openai-compat.js";
 import type { MockResponse } from "./mock.js";
-import type { LlamaCppProviderOptions, LlamaRuntime } from "./llama-cpp.js";
+import type {
+  LlamaCppProviderOptions,
+  LlamaGpu,
+  LlamaRuntime,
+} from "./llama-cpp.js";
 import type { LlamaTier } from "./llama-models.js";
 import type { ExecFn, InferenceProvider } from "./types.js";
 
@@ -170,7 +174,9 @@ export async function resolveProviderIdentityAsync(
     return resolveProviderIdentity(resolved);
   }
   const tier: LlamaTier =
-    model === "auto" ? await probeTier(llamaRuntimeFor(spec)) : model;
+    model === "auto"
+      ? await probeTier(llamaRuntimeFor(spec), spec.llamaCpp?.gpu)
+      : model;
   return { provider, model: aliasForTier(tier) };
 }
 
@@ -203,8 +209,13 @@ function llamaRuntimeFor(spec: ProviderSpec): LlamaRuntime | undefined {
   return spec.llamaRuntime ?? spec.llamaCpp?.runtime;
 }
 
-async function probeTier(runtime: LlamaRuntime | undefined): Promise<LlamaTier> {
-  const source = runtime ?? defaultLlamaRuntime();
+async function probeTier(
+  runtime: LlamaRuntime | undefined,
+  gpu: LlamaGpu | undefined,
+): Promise<LlamaTier> {
+  // The same backend the provider will run on, so the probe and the calls
+  // share one worker — and a backend that crashes is found here, not later.
+  const source = runtime ?? defaultLlamaRuntime(gpu !== undefined ? { gpu } : {});
   return tierForBudget(await source.getMemoryBudgetBytes());
 }
 

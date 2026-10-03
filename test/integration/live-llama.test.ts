@@ -172,7 +172,8 @@ live("live llama-cpp provider", () => {
       const model = await real.loadModel(path);
       try {
         expect(model.trainContextSize).toBe(131_072);
-        const count = model.countTokens?.("The cat sat on the mat.");
+        // Async since ADR 01012: the tokenizer lives in the worker process.
+        const count = await model.countTokens?.("The cat sat on the mat.");
         expect(count).toBeGreaterThan(0);
         expect(count).toBeLessThan(20);
       } finally {
