@@ -110,7 +110,8 @@ library's **own** directory, deliberately not node-llama-cpp's shared `~/.node-l
 Selective clearing matches by **suffix**, because downloads are prefixed `hf_<user>_`, and removes
 every part of a split model. An unknown name is rejected rather than silently matching nothing.
 
-`disposeLlamaModels()` frees the process-wide weight cache. Weights load once per process and are
+`disposeLlamaModels()` frees the process-wide weight cache and stops the
+[local-model workers](#the-worker-process-and-the-backend). Weights load once per process and are
 shared across providers naming the same model.
 
 ## The runtime seam
@@ -126,7 +127,7 @@ interface LlamaLoadedModel {
   createSession(systemPrompt: string, contextSize?: number): Promise<LlamaSession>;
   dispose(): Promise<void>;
   readonly trainContextSize?: number;   // the model's training context, in tokens
-  countTokens?(text: string): number;   // the model's own tokenizer
+  countTokens?(text: string): number | Promise<number>;   // the model's own tokenizer
 }
 
 interface LlamaSession {
@@ -148,12 +149,16 @@ interface LlamaPromptResult {
   stopReason?: string;
 }
 
-function defaultLlamaRuntime(): LlamaRuntime;
+function defaultLlamaRuntime(options?: { gpu?: LlamaGpu }): LlamaRuntime;
+
+type LlamaGpu = "auto" | "cuda" | "vulkan" | "metal" | false;
 ```
 
-`defaultLlamaRuntime()` is a lazy adapter over `await import("node-llama-cpp")`; a missing module
-raises an `InferenceError` naming `npm i node-llama-cpp`. The built `dist/index.js` contains only
-the dynamic import, so consumers without the package still typecheck.
+`defaultLlamaRuntime()` is lazy: constructing it starts no process and loads no native code. Its
+first use finds `node-llama-cpp` (a missing module raises an `InferenceError` naming
+`npm i node-llama-cpp`) and starts a [worker process](#the-worker-process-and-the-backend) to run
+it. The built `dist/index.js` contains only a dynamic import, so consumers without the package
+still typecheck.
 
 Inject a fake through `ProviderSpec.llamaRuntime` to test the whole local path with no weights and
 no GPU. See [testing your integration](/inference/keep-it-working/testing/).
@@ -165,7 +170,8 @@ The provider passes `createSession` the context size it computed for the prompt.
 creates exactly that many tokens of context, rounded up to a multiple of 256 by llama.cpp, and 8192
 when no size is passed. `trainContextSize` and `countTokens` are optional, so a fake written without
 them still satisfies the interface. Without `countTokens`, the provider uses the 8192-token default
-and does not check that the prompt fits.
+and does not check that the prompt fits. `countTokens` may return a promise; the real runtime's does,
+because its tokenizer lives in the worker.
 
 ## `LlamaCppProvider`
 
@@ -180,6 +186,7 @@ interface LlamaCppProviderOptions {
   maxTokens?: number;
   contextSize?: number;     // default: sized to each prompt, 8192 tokens at least
   modelsDirectory?: string;
+  gpu?: LlamaGpu;           // default: NODE_LLAMA_CPP_GPU, else "auto"
 }
 ```
 
@@ -215,6 +222,42 @@ memory allowed. For `granite-4.1-3b-q2`, trained on 131072 tokens, a one-field p
 tokens took 12.9 GB on CPU. With the 8192-token default the same call takes 2.85 GB.
 [ADR 01011](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01011-size-the-local-context-to-the-prompt.md)
 records the measurements and the options weighed.
+
+## The worker process and the backend
+
+The real runtime does not run llama.cpp in your process. It forks a worker, `llama-worker.js` from
+beside the package's `index.js`, and sends it each load, session and prompt over IPC. Your process
+never initialises a GPU backend.
+
+The reason is that llama.cpp reports a fatal GPU error by aborting the process (`GGML_ABORT`), and
+no `try` can catch that. On some Windows machines with an NVIDIA GPU, node-llama-cpp's prebuilt CUDA
+backend does this intermittently mid-generation, printing `ggml-cuda.cu:106: CUDA error`. In-process,
+that ended the consumer and every result it had computed. In a worker, it ends the worker.
+
+| `gpu` (or `NODE_LLAMA_CPP_GPU`) | Starts on | When a worker crashes |
+|---|---|---|
+| unset, or `"auto"` | the best backend this machine has | the call is retried on the next one — CUDA, then Vulkan, then the CPU — and the crashed backend is skipped for the rest of the process |
+| `"cuda"`, `"vulkan"`, `"metal"`, or `false` (CPU) | that backend | never replaced: the call fails with an `InferenceError` naming the crash, recorded on `run.error` |
+
+Each switch is announced once on stderr; the messages are in the
+[warnings reference](/inference/reference/warnings/). The CPU is a last resort, because it is about
+50× slower. If you would rather fail fast than wait, pin a backend.
+
+Only an abnormal exit counts as a crash. An ordinary error, such as a context overflow, a grammar
+error or a missing model file, passes through unchanged on the same worker and is never retried on
+another backend.
+
+The backend is not part of the provider identity or the cache key. Two backends run the same
+weights under the same grammar, and a cache that missed after every fallback would make you pay
+for the work twice.
+
+One worker serves every model loaded for a backend. It holds your process open only while a call is
+in flight, so a script that never calls `disposeLlamaModels()` still exits when its work is done, and
+the worker exits with it. If you bundle this package into a single file, the worker cannot be found.
+The runtime then runs in-process as before and warns that a native crash will end the process.
+
+[ADR 01012](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01012-isolate-local-inference-in-a-worker-process.md)
+records the crash, the options weighed, and why a pre-flight probe cannot replace this.
 
 ## Getting the runtime
 

@@ -156,7 +156,7 @@ Reference pages must never contradict the source. Cross-read the paired files be
 | `reference/judge.mdx` | `src/judge/ensemble.ts`, `src/judge/consensus.ts`, `src/judge/zones.ts`, `src/judge/types.ts`, `src/judge/verdict-schema.json` |
 | `reference/cache.mdx` | `src/cache.ts` |
 | `reference/cost.mdx` | `src/cost.ts` |
-| `reference/local-models.mdx` | `src/providers/llama-models.ts`, `src/providers/llama-cpp.ts`, `src/providers/llama-clean.ts` |
+| `reference/local-models.mdx` | `src/providers/llama-models.ts`, `src/providers/llama-cpp.ts`, `src/providers/llama-host.ts`, `src/providers/llama-worker.ts`, `src/providers/llama-clean.ts` |
 | `reference/exec.mdx` | `src/exec.ts`, `src/providers/types.ts` |
 | `reference/errors-and-types.mdx` | `src/types.ts`, `src/index.ts` |
 
