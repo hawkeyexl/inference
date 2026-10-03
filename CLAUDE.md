@@ -86,6 +86,12 @@ CUJ codes are `R1`–`R2`, `P1`–`P4`, `M1`–`M3`, `O1`–`O3`, `X1`, `U1`; `P
   gates depend on this.
 - **The cache is an optimization, never a dependency.** A write failure warns once and the run
   continues. A corrupt entry is a miss. Neither ever aborts work already paid for.
+- **Local inference runs in a worker process; the consumer's never touches the GPU.** llama.cpp
+  reports a fatal GPU error with a native abort no `try` can catch, so `defaultLlamaRuntime()`
+  forks `llama-worker.ts` and talks to it over IPC. A worker that dies mid-request is a fallback to
+  the next backend (`"auto"`) or an errored run (a pinned backend), never a dead consumer. Keep
+  `llama-worker.ts` free of runtime imports other than `node:` builtins — the suite forks it from
+  `src/`. ADR 01012.
 - **The claude-cli prompt goes over stdin, never argv.** Windows caps the command line at ~32K
   characters and user content routinely exceeds it. `test/unit/claude-cli.test.ts` pins this.
 - **Verify against the real machine; fake only external services.** A test double is permitted

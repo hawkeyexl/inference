@@ -7,7 +7,7 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-Seven failures that account for most of the trouble, each with more context than the
+Nine failures that account for most of the trouble, each with more context than the
 [error reference](/inference/reference/errors/) can give in a row.
 
 ## No provider is available
@@ -141,6 +141,32 @@ if (pricing === undefined) warn(`no price for ${provider.modelName()} — the bu
 Three roads lead here: a hosted model absent from the price table, `claude-cli` (which reports no
 token usage at all), and any local model. Full detail in
 [cost and budgets](/inference/judge/cost-and-budgets/#the-trap).
+
+## A local model run dies with a CUDA error
+
+```text
+D:
+ode-llama-cpp
+ode-llama-cpp\llama\llama.cpp\ggml\src\ggml-cuda\ggml-cuda.cu:106: CUDA error
+```
+
+On some Windows machines with an NVIDIA GPU, node-llama-cpp's prebuilt CUDA backend aborts partway
+through generation. It is a native abort, so there is no exception to catch. Before version 0.4.0
+the abort ended your process, along with every result it had computed. Environment switches such as
+`GGML_CUDA_DISABLE_GRAPHS` and `CUDA_LAUNCH_BLOCKING` do not stop it.
+
+Since 0.4.0 the model runs in a
+[worker process](/inference/reference/local-models/#the-worker-process-and-the-backend), so the
+abort ends only the worker. What happens next depends on whether you chose the backend:
+
+| Backend | What you see |
+|---|---|
+| `"auto"` (the default) | one warning, `CUDA backend crashed … Retrying on Vulkan`. The call succeeds, and the rest of the process runs on Vulkan. |
+| pinned with `llamaCpp.gpu` or `NODE_LLAMA_CPP_GPU` | the call fails with an `InferenceError` that names the crash, and an ensemble records it on `run.error` |
+
+**Fix:** on such a machine, start on Vulkan with `NODE_LLAMA_CPP_GPU=vulkan` or
+`llamaCpp.gpu: "vulkan"`. That skips the crash and the retry it costs. On an RTX 4090, Vulkan judged
+a call in about 12 seconds, where the CPU took over ten minutes.
 
 ## Something ran twice that should have been cached
 

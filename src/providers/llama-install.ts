@@ -87,6 +87,17 @@ export function defaultLlamaRuntimeDirectory(
 }
 
 /**
+ * The URL that imports the binding from the library-owned prefix. The
+ * local-model worker is a separate process, so it imports by URL what this
+ * process imported through `importNodeLlamaCpp`.
+ */
+export function nodeLlamaCppShimUrl(
+  directory: string = defaultLlamaRuntimeDirectory(),
+): string {
+  return pathToFileURL(join(directory, SHIM)).href;
+}
+
+/**
  * Is this import failure "the package is not here", as opposed to "the package
  * is here and broken"?
  *

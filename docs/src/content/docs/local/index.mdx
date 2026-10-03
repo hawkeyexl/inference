@@ -1,6 +1,6 @@
 ---
 title: Run models locally
-description: Run GGUF weights in-process with no daemon, no API key, and no per-token cost.
+description: Run GGUF weights locally with no daemon, no API key, and no per-token cost.
 sidebar:
   order: 1
 ---
@@ -10,8 +10,11 @@ import localProvider from '@examples/local-provider.mjs?raw';
 
 Remove the credential dependency without changing what your tool does.
 
-The `llama-cpp` provider runs GGUF weights in-process via
+The `llama-cpp` provider runs GGUF weights locally via
 [`node-llama-cpp`](https://node-llama-cpp.withcat.ai). No daemon, no API key, no per-token cost.
+The model runs in a worker process the library starts and stops for you, so a crash in llama.cpp's
+native code costs a retry rather than your process. See
+[the worker process and the backend](/inference/reference/local-models/#the-worker-process-and-the-backend).
 
 ## What stays the same
 

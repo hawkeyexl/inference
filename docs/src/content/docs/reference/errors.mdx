@@ -177,6 +177,14 @@ constructed.
 **Fix:** pass a whole number of tokens, such as `8192`, or leave it unset so each context is sized to
 its prompt.
 
+### `llamaCpp.gpu must be "auto", "cuda", "vulkan", "metal" or false, got <X>.`
+
+`llamaCpp.gpu` named a backend node-llama-cpp does not have, such as `"rocm"`, or was not a string
+or `false`. Thrown when the provider is constructed.
+
+**Fix:** use one of the listed values, or leave it unset so `NODE_LLAMA_CPP_GPU` decides, and
+failing that `"auto"`. The CPU is `false`, not `"cpu"`.
+
 ### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, mock, llama-cpp.`
 
 A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
@@ -282,6 +290,54 @@ The same count, against the fixed size you set with `llamaCpp.contextSize`.
 **Fix:** raise `llamaCpp.contextSize`, or set `llamaCpp.maxTokens` to shrink the response reserve,
 or leave `contextSize` unset so each context is sized to its prompt. A fixed size below about 2600
 tokens holds no prompt at all until `maxTokens` is set, because the default reserve is 2048.
+
+### `llama.cpp's <B> backend crashed the local-model worker (<exit>). <B> was chosen explicitly (<setting>), so the library did not switch backends. …`
+
+llama.cpp aborted the [local-model worker](/inference/reference/local-models/#the-worker-process-and-the-backend)
+on backend `<B>`, for example with `exit code 127: …ggml-cuda.cu:106: CUDA error`. You pinned that
+backend with `llamaCpp.gpu` or `NODE_LLAMA_CPP_GPU`, so the call was not moved to another one. Your
+process is unaffected. Only the worker died, and the next call starts a fresh one on the same
+backend.
+
+**Fix:** pin a different backend (`NODE_LLAMA_CPP_GPU=vulkan`, or `false` for the CPU), or unset it
+so the library falls back on its own. For CUDA, the `ggml-cuda.cu` line in the message is the one to
+report upstream.
+
+### `llama.cpp crashed the local-model worker on every backend this machine offers — <B> (<exit>), …, CPU (<exit>). The request was not answered.`
+
+With `gpu` on `"auto"`, the worker crashed on each GPU backend in turn and then on the CPU, the last
+resort. When every backend fails, the request itself is the likelier cause. Later calls still try
+the CPU.
+
+**Fix:** read the per-backend exits in the message, which hold llama.cpp's own last line. Try a
+smaller prompt or a different model, and report the abort to node-llama-cpp.
+
+### `llama.cpp's local-model worker crashed before it chose a backend (<exit>). The request was not answered.`
+
+The worker died before it named a backend, so there was nothing to fall back from. That usually
+means node-llama-cpp itself could not load in the worker process.
+
+**Fix:** run `npx node-llama-cpp inspect gpu` to check the binding on this machine, and read the
+exit in the message.
+
+### `The local-model worker was shut down by disposeLlamaModels while a call was still running.`
+
+`disposeLlamaModels()` ran while a call was in flight, and stopped the worker serving it.
+
+**Fix:** await your calls before disposing.
+
+### `Could not start the local-model worker (<ERR>).`
+
+Node could not fork the worker process: the OS refused a new process, or the Node executable could
+not be run again.
+
+**Fix:** read `<ERR>`. This is a machine-level failure, not a model one.
+
+### `The local-model worker was not initialised.` — or `The local-model worker has no model <N>.`, `The local-model worker has no session <N>.`
+
+An internal consistency check in the worker failed. These should never appear.
+
+**Fix:** report it, with the call that produced it.
 
 ### `Failed to run <cmd>: <spawnError> (is the Claude CLI installed?)`
 

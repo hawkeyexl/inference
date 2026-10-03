@@ -21,4 +21,15 @@ describe("source hygiene", () => {
       .filter((path) => readFileSync(path).includes(0));
     expect(offenders).toEqual([]);
   });
+
+  it("keeps the local-model worker runnable by Node without a build", () => {
+    // The worker is forked from `src/` under vitest, where Node strips its
+    // types but cannot map a sibling's `.js` import to its `.ts`. So it may
+    // import only Node builtins at runtime; types are erased and harmless.
+    const source = readFileSync(join("src", "providers", "llama-worker.ts"), "utf8");
+    const runtimeImports = [
+      ...source.matchAll(/^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["']([^"']+)["']/gm),
+    ].map((m) => m[1]);
+    expect(runtimeImports.filter((s) => !s!.startsWith("node:"))).toEqual([]);
+  });
 });

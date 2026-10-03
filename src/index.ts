@@ -88,6 +88,7 @@ export {
 } from "./providers/llama-cpp.js";
 export type {
   LlamaCppProviderOptions,
+  LlamaGpu,
   LlamaLoadedModel,
   LlamaPromptOptions,
   LlamaPromptResult,

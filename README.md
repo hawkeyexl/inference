@@ -1,7 +1,7 @@
 # @hawkeyexl/inference
 
 Shared LLM inference layer for the docs-as-tests toolchain: schema-constrained completion across
-Anthropic, OpenAI-compatible, Claude CLI, and in-process local (llama.cpp) providers, with result
+Anthropic, OpenAI-compatible, Claude CLI, and local (llama.cpp) providers, with result
 caching, cost accounting, and an LLM-as-judge ensemble on top.
 
 Extracted from three projects that had each grown their own copy —
@@ -101,7 +101,7 @@ tokens makes a budget gate inert. See
 | [Get started](https://hawkeyexl.github.io/inference/get-started/) | Install, one validated call with no key, choosing a provider |
 | [Judge & consensus](https://hawkeyexl.github.io/inference/judge/) | Ensembles, consensus math, confidence zones, caching, budgets |
 | [Structured extraction](https://hawkeyexl.github.io/inference/extract/) | One schema-constrained call, honest failures, the subprocess seam |
-| [Run models locally](https://hawkeyexl.github.io/inference/local/) | GGUF weights in-process, model selection, managing weights on disk |
+| [Run models locally](https://hawkeyexl.github.io/inference/local/) | GGUF weights run locally, model selection, managing weights on disk |
 | [Keep it working](https://hawkeyexl.github.io/inference/keep-it-working/testing/) | Testing without a network, upgrading without losing a cache |
 | [Reference](https://hawkeyexl.github.io/inference/reference/providers/) | Full signatures for every export |
 

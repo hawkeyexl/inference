@@ -1,19 +1,19 @@
 ---
 title: Warnings reference
-description: The five warnings the library writes to console.warn, when each fires, and how to reset them in tests.
+description: The eight warnings the library writes to console.warn, when each fires, and how to reset them in tests.
 sidebar:
   order: 9
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The library writes to `console.warn` in exactly five places. Nothing else in the docset says so,
+The library writes to `console.warn` in exactly eight places. Nothing else in the docset says so,
 which matters if your tool owns its own output formatting.
 
 Each warning fires **at most once**, but the scope of "once" differs per warning, and that catches
 people out in tests.
 
-## The five
+## The eight
 
 | Warning | Fires once per | Reset with |
 |---|---|---|
@@ -22,6 +22,9 @@ people out in tests.
 | Cache write failure | **cache instance** | construct a new `JsonCache` |
 | Provider auto-selected | process | `resetProviderDetectionWarning()` |
 | Local weights not downloaded | process | `resetProviderDetectionWarning()` |
+| Local runtime being installed | process | `resetRuntimeInstall()` |
+| Local backend crashed, switching | **backend switch** | none — a crashed backend stays skipped for the process |
+| Local-model worker missing | process | none |
 
 ### `inference: running on Node <version>, older than the Node 24 this package requires. npm only warns about that at install time (EBADENGINE), so nothing has stopped you yet — upgrade Node, or expect failures this library cannot explain.`
 
@@ -78,6 +81,31 @@ so you can still stop it.
   download it is not going to do.
 </Aside>
 
+### `inference: node-llama-cpp is not installed — fetching it into <DIR> so the local model can run. …`
+
+Fires once, before the library installs `node-llama-cpp` into its own runtime directory, because
+the binding was not found in your `node_modules`. The install is a native module and can take a
+while. Set `INFERENCE_NO_AUTO_INSTALL=1` to refuse it.
+
+### `inference: llama.cpp's <B> backend crashed the local-model worker (<exit>). Retrying on <next>, and staying on <next> for the rest of this process. …`
+
+Fires when llama.cpp aborts the [local-model worker](/inference/reference/local-models/#the-worker-process-and-the-backend)
+on backend `<B>` while `gpu` is `"auto"`. The call that crashed is retried on `<next>` and so is
+every later call, so you hear this once per switch. On a Windows machine with an NVIDIA GPU it most
+often reads `CUDA backend crashed … ggml-cuda.cu:106: CUDA error … Retrying on Vulkan`.
+
+When the next backend is the CPU, the message instead says `Retrying on the CPU, which is much
+slower — expect minutes per call`. Pin a backend with `NODE_LLAMA_CPP_GPU` or `llamaCpp.gpu` to
+start on the one that works, or to fail fast instead of waiting.
+
+### `inference: the local-model worker (llama-worker.js) is missing beside this library — was it bundled? …`
+
+Fires once when the package's `llama-worker.js` is not next to its `index.js`, which happens when a
+bundler has inlined this library into a file of its own. Local models then run in your process, as
+they did before the worker existed, and a native crash in llama.cpp will end it.
+
+**Fix:** mark `@hawkeyexl/inference` as external in your bundler.
+
 ## Capturing or silencing them
 
 There is no log-level option. If your tool formats its own output, wrap `console.warn` for the
@@ -120,4 +148,5 @@ probe rather than a warning.
 
 ## Source of truth
 
-`src/runtime.ts`, `src/judge/ensemble.ts`, `src/cache.ts`, and `src/providers/detect.ts`.
+`src/runtime.ts`, `src/judge/ensemble.ts`, `src/cache.ts`, `src/providers/detect.ts`,
+`src/providers/llama-install.ts`, and `src/providers/llama-host.ts`.

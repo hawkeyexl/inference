@@ -12,7 +12,9 @@
  *
  * Second, everything real happens behind `LlamaRuntime`. Tests inject a fake
  * and never touch the network, the filesystem, or a GPU (the same seam as
- * `ExecFn` for the Claude CLI provider).
+ * `ExecFn` for the Claude CLI provider). The real runtime runs node-llama-cpp
+ * in a worker process, so a native abort in llama.cpp costs a retry on another
+ * backend rather than the consumer's process — see `llama-host.ts`, ADR 01012.
  */
 import { InferenceError } from "../types.js";
 import { buildCacheKey } from "../cache.js";
@@ -23,13 +25,16 @@ import {
   isLlamaSelector,
   resolveLlamaModelRef,
 } from "./llama-models.js";
-import { importNodeLlamaCpp, isModuleNotFound } from "./llama-install.js";
+import { createWorkerRuntime, isLlamaGpu, shutdownLlamaWorkers } from "./llama-host.js";
+import type { LlamaGpu } from "./llama-host.js";
 import type {
   CompleteJSONRequest,
   CompleteJSONResponse,
   InferenceProvider,
   TokenUsage,
 } from "./types.js";
+
+export type { LlamaGpu } from "./llama-host.js";
 
 export interface LlamaPromptOptions {
   /** JSON Schema converted to a GBNF grammar by the runtime. */
@@ -76,9 +81,10 @@ export interface LlamaLoadedModel {
   readonly trainContextSize?: number;
   /**
    * Count `text` in this model's own tokens. Optional for the same reason;
-   * without it the provider uses the default size and cannot check fit.
+   * without it the provider uses the default size and cannot check fit. May
+   * be async: the real runtime's tokenizer lives in the worker process.
    */
-  countTokens?(text: string): number;
+  countTokens?(text: string): number | Promise<number>;
 }
 
 /**
@@ -124,6 +130,16 @@ export interface LlamaCppProviderOptions {
    * directory — see `defaultLlamaModelsDirectory`.
    */
   modelsDirectory?: string;
+  /**
+   * The llama.cpp backend: `"cuda"`, `"vulkan"`, `"metal"`, or `false` for the
+   * CPU. Unset, `NODE_LLAMA_CPP_GPU` decides, and failing that `"auto"`.
+   *
+   * `"auto"` picks the best backend this machine has and, if it crashes the
+   * local-model worker, retries on the next — CUDA, then Vulkan, then the CPU —
+   * for the rest of the process. A named backend is never replaced: a crash on
+   * it is an error. Ignored when `runtime` is injected. ADR 01012.
+   */
+  gpu?: LlamaGpu;
 }
 
 /**
@@ -150,6 +166,8 @@ export async function disposeLlamaModels(): Promise<void> {
   await Promise.all(
     pending.map((p) => p.then((m) => m.dispose()).catch(() => undefined)),
   );
+  // The weights lived in the local-model workers; end those processes too.
+  await shutdownLlamaWorkers();
 }
 
 /**
@@ -205,9 +223,17 @@ export class LlamaCppProvider implements InferenceProvider {
           `got ${String(options.contextSize)}.`,
       );
     }
+    if (options.gpu !== undefined && !isLlamaGpu(options.gpu)) {
+      throw new InferenceError(
+        `llamaCpp.gpu must be "auto", "cuda", "vulkan", "metal" or false, ` +
+          `got ${JSON.stringify(options.gpu) ?? String(options.gpu)}.`,
+      );
+    }
     this.contextSize = options.contextSize;
     this.uri = resolveLlamaModelRef(model);
-    this.runtime = options.runtime ?? defaultLlamaRuntime();
+    this.runtime =
+      options.runtime ??
+      defaultLlamaRuntime(options.gpu !== undefined ? { gpu: options.gpu } : {});
     this.thoughtTokens = options.thoughtTokens ?? 0;
     this.maxTokens = options.maxTokens;
     this.modelsDirectory =
@@ -229,7 +255,7 @@ export class LlamaCppProvider implements InferenceProvider {
     // A fresh session per call: the contract is single-shot, and reusing one
     // would leak the previous run's turns into this one's context. Its context
     // is created here, where the prompt is known, so it is sized to the prompt.
-    const plan = this.contextFor(model, systemPrompt, req.user);
+    const plan = await this.contextFor(model, systemPrompt, req.user);
     const session = await model.createSession(systemPrompt, plan.contextSize);
     // With no maxTokens, the response is capped at the room the context has
     // left. Uncapped, a long answer fills the context and node-llama-cpp shifts
@@ -279,11 +305,11 @@ export class LlamaCppProvider implements InferenceProvider {
    * fit is refused here, before anything is created. llama.cpp would otherwise
    * shift the overflow out of the context and answer a prompt nobody sent.
    */
-  private contextFor(
+  private async contextFor(
     model: LlamaLoadedModel,
     systemPrompt: string,
     user: string,
-  ): { contextSize: number; promptTokens?: number } {
+  ): Promise<{ contextSize: number; promptTokens?: number }> {
     const ceiling = model.trainContextSize;
     const fallback =
       this.contextSize ??
@@ -292,8 +318,10 @@ export class LlamaCppProvider implements InferenceProvider {
         : DEFAULT_CONTEXT_SIZE);
     if (!model.countTokens) return { contextSize: fallback };
 
-    const system = model.countTokens(systemPrompt);
-    const prompt = model.countTokens(user);
+    const [system, prompt] = await Promise.all([
+      model.countTokens(systemPrompt),
+      model.countTokens(user),
+    ]);
     const response =
       (this.maxTokens ?? DEFAULT_RESPONSE_RESERVE_TOKENS) + this.thoughtTokens;
     const promptTokens = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS;
@@ -401,137 +429,11 @@ export function restoreOpenBrace(text: string): string {
   }
 }
 
-/** Cached so repeated provider construction imports the native module once. */
-let runtimePromise: Promise<LlamaRuntime> | undefined;
-
 /**
- * Lazy adapter over the real `node-llama-cpp`. Every method defers to the
- * dynamic import, so constructing a provider for a fully-cached run never
- * loads the native binary.
+ * The real runtime: node-llama-cpp in a worker process, falling back from a
+ * GPU backend that crashes it. Lazy — constructing a provider for a
+ * fully-cached run starts no process and loads no native binary.
  */
-export function defaultLlamaRuntime(): LlamaRuntime {
-  const real = (): Promise<LlamaRuntime> =>
-    // Drop a failed init so the next call retries. A GPU that failed to
-    // initialise, or a binary still being extracted by a concurrent install,
-    // must not poison the runtime for the rest of the process — the same rule
-    // `load()` applies to weights.
-    (runtimePromise ??= loadNodeLlamaCpp().catch((e: unknown) => {
-      runtimePromise = undefined;
-      throw e;
-    }));
-  return {
-    resolveModelFile: (uri, directory) =>
-      real().then((r) => r.resolveModelFile(uri, directory)),
-    loadModel: (path) => real().then((r) => r.loadModel(path)),
-    getMemoryBudgetBytes: () => real().then((r) => r.getMemoryBudgetBytes()),
-  };
-}
-
-async function loadNodeLlamaCpp(): Promise<LlamaRuntime> {
-  let mod: typeof import("node-llama-cpp");
-  try {
-    mod = await import("node-llama-cpp");
-  } catch (e) {
-    // A package that resolved and then failed to load — ABI mismatch, missing
-    // system library, unsupported Node — is not a missing package. Installing
-    // over it would fetch the same broken thing again and replace a precise
-    // error with a download.
-    if (!isModuleNotFound(e)) {
-      throw new InferenceError(
-        `node-llama-cpp is installed but failed to load (${
-          e instanceof Error ? e.message : String(e)
-        }). This is the copy resolved from your own node_modules, so ` +
-          `reinstalling it here will not help — check the Node version and the ` +
-          `platform build.`,
-      );
-    }
-    // Genuinely absent, so fall back to the library's own prefix — installing
-    // it there if needed. npm does not install optional peers, and detection
-    // ends at this provider precisely because it needs no credentials, so
-    // refusing here would strand the one machine `auto` exists to serve.
-    // Resetting `runtimePromise` is the caller's job — see `defaultLlamaRuntime`.
-    mod = (await importNodeLlamaCpp()) as typeof import("node-llama-cpp");
-  }
-
-  const { getLlama, resolveModelFile, LlamaChatSession, TokenMeter } = mod;
-  const llama = await getLlama();
-
-  return {
-    // `directory` is this library's own, not node-llama-cpp's global default —
-    // owning it is what makes `clearLlamaModels` safe.
-    resolveModelFile: (uri, directory) => resolveModelFile(uri, { directory }),
-
-    async loadModel(path) {
-      const model = await llama.loadModel({ modelPath: path });
-      return {
-        trainContextSize: model.trainContextSize,
-        countTokens: (text) => model.tokenize(text).length,
-        async createSession(systemPrompt, contextSize) {
-          // Always an explicit size. Left out, node-llama-cpp sizes the context
-          // to free memory, which is the bug ADR 01011 records.
-          const context = await model.createContext({
-            contextSize: contextSize ?? DEFAULT_CONTEXT_SIZE,
-          });
-          const sequence = context.getSequence();
-          const session = new LlamaChatSession({
-            contextSequence: sequence,
-            systemPrompt,
-          });
-          return {
-            contextSize: context.contextSize,
-            async prompt(text, options) {
-              const grammar = await llama.createGrammarForJsonSchema(
-                options.schema as Parameters<
-                  typeof llama.createGrammarForJsonSchema
-                >[0],
-              );
-              const before = sequence.tokenMeter.getState();
-              const result = await session.promptWithMeta(text, {
-                grammar,
-                temperature: options.temperature,
-                budgets: { thoughtTokens: options.thoughtTokens },
-                ...(options.maxTokens != null
-                  ? { maxTokens: options.maxTokens }
-                  : {}),
-              });
-              // promptWithMeta does not report usage; the sequence's meter does.
-              const diff = TokenMeter.diff(sequence.tokenMeter, before);
-              return {
-                text: result.responseText,
-                stopReason: result.stopReason,
-                usage: {
-                  inputTokens: diff.usedInputTokens,
-                  outputTokens: diff.usedOutputTokens,
-                },
-              };
-            },
-            async dispose() {
-              await context.dispose();
-            },
-          };
-        },
-        async dispose() {
-          await model.dispose();
-        },
-      };
-    },
-
-    async getMemoryBudgetBytes() {
-      const { totalmem } = await import("node:os");
-      // Half of RAM is what a judge can reasonably claim on a shared machine;
-      // a GPU's free VRAM is usable outright.
-      const ramBudget = totalmem() / 2;
-      try {
-        const vram = await llama.getVramState();
-        // The LARGER of the two, not VRAM in preference to RAM: llama.cpp
-        // offloads the layers that fit onto the GPU and keeps the rest in
-        // system RAM, so a small GPU beside plenty of RAM still runs a big
-        // model. Sizing off VRAM alone would idle most of such a machine.
-        return Math.max(vram.free, ramBudget);
-      } catch {
-        // CPU-only builds and probe failures are normal, never fatal.
-        return ramBudget;
-      }
-    },
-  };
+export function defaultLlamaRuntime(options: { gpu?: LlamaGpu } = {}): LlamaRuntime {
+  return createWorkerRuntime(options);
 }
