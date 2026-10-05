@@ -336,6 +336,20 @@ A provider, or a `MockProvider` script, gave a weight that is negative, `NaN` or
 
 **Fix:** script weights of 0 or more. They need not sum to 1, since they are normalized.
 
+### `llama-cpp decide() question "<Q>" has <N> criteria; it letters options A to Z, so 26 at most.`
+
+The llama-cpp provider asks the model for a letter per option, and the alphabet has 26. See
+[decisions](/inference/reference/local-models/#decisions).
+
+**Fix:** split the question, or group its options into at most 26.
+
+### `This llama-cpp runtime's sessions have no decide(), so the provider cannot answer decisions.`
+
+A `LlamaRuntime` you injected opens sessions without the optional `decide` method. The default
+runtime has it.
+
+**Fix:** add `decide` to your fake's sessions, or leave `runtime` unset.
+
 ## Model failures — recorded on `run.error`
 
 None of these throw. Each arrives with `result` (or `verdict`) absent.
@@ -403,6 +417,7 @@ the context to keep generating, and the rest of the answer would follow a prompt
 The prompt does not fit the largest context the model supports. `<N>` is the system prompt with its
 restated schema, plus the user prompt, plus 512 tokens of chat-template overhead, plus room for the
 response: `maxTokens`, or 2048 when it is unset, plus `thoughtTokens`. The message lists each count.
+For `decide()`, the user prompt is the longest question's, and the response is 8 tokens.
 
 Nothing is generated. Sending the prompt anyway would make llama.cpp shift its start out of the
 context, and the model would answer a prompt you did not send. Called directly, `completeJSON`
@@ -461,7 +476,15 @@ not be run again.
 
 **Fix:** read `<ERR>`. This is a machine-level failure, not a model one.
 
-### `The local-model worker was not initialised.` — or `The local-model worker has no model <N>.`, `The local-model worker has no session <N>.`
+### `The model has no single token for the answer label "<L>", so it cannot decide.`
+
+A decision reads the probability of each option's letter as the next token. This model's vocabulary
+spells the letter `<L>` only as several tokens, with or without a leading space, so there is no one
+token to read. No catalog model does this.
+
+**Fix:** use a catalog model for decisions.
+
+### `The local-model worker was not initialised.` — or `The local-model worker has no model <N>.`, `The local-model worker has no session <N>.`, `This local-model session has no context sequence to decide on.`
 
 An internal consistency check in the worker failed. These should never appear.
 

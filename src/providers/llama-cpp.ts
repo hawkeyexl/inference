@@ -26,11 +26,12 @@ import {
   resolveLlamaModelRef,
 } from "./llama-models.js";
 import { createWorkerRuntime, isLlamaGpu, shutdownLlamaWorkers } from "./llama-host.js";
+import { normalizeDecision, validateDecideRequest } from "./decide.js";
+import type { DecideQuestion, DecideRequest, DecideResponse, DecisionProvider } from "./decide.js";
 import type { LlamaGpu } from "./llama-host.js";
 import type {
   CompleteJSONRequest,
   CompleteJSONResponse,
-  InferenceProvider,
   TokenUsage,
 } from "./types.js";
 
@@ -55,8 +56,43 @@ export interface LlamaPromptResult {
   stopReason?: string;
 }
 
+/**
+ * One decision request, as the provider hands it to a session: one user turn
+ * per question, each opening the same way, so the runtime can evaluate the
+ * shared start once. ADR 01016.
+ */
+export interface LlamaDecideOptions {
+  /** One user turn per question. */
+  prompts: string[];
+  /** What the assistant's turn opens with; the token after it is the answer. */
+  answerPrefix: string;
+  /** Per prompt, the labels whose next-token probability is read. */
+  labels: string[][];
+}
+
+/**
+ * How a session got back to the shared start between questions:
+ * `"erase"` removed the previous question from the context, `"checkpoint"`
+ * restored a snapshot (hybrid and recurrent models, which cannot erase), and
+ * `"reevaluate"` evaluated the shared start again.
+ */
+export type LlamaDecideReuse = "erase" | "checkpoint" | "reevaluate";
+
+export interface LlamaDecideResult {
+  /** Per prompt, each label's next-token probability. Need not sum to 1. */
+  weights: Record<string, number>[];
+  usage?: TokenUsage;
+  /** Absent for a single question, which reuses nothing. */
+  reuse?: LlamaDecideReuse;
+}
+
 export interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  /**
+   * Next-token probabilities for each prompt's labels. Optional: a runtime
+   * without it makes `decide()` reject. The real runtime has it.
+   */
+  decide?(options: LlamaDecideOptions): Promise<LlamaDecideResult>;
   dispose(): Promise<void>;
   /**
    * Tokens of context the runtime actually created. llama.cpp may round a
@@ -188,7 +224,30 @@ const CHAT_TEMPLATE_OVERHEAD_TOKENS = 512;
 /** Room for the response when `maxTokens` does not bound it. */
 const DEFAULT_RESPONSE_RESERVE_TOKENS = 2048;
 
-export class LlamaCppProvider implements InferenceProvider {
+/**
+ * A decision's response: the answer prefix the runtime adds to the assistant
+ * turn, and the one letter read after it.
+ */
+const DECIDE_ANSWER_TOKENS = 8;
+
+/**
+ * Room `stateLimit()` keeps for what the provider adds around a consumer's
+ * state and question: headings, option letters, the closing instruction.
+ * About 30 tokens plus 3 per option, so 26 options fit.
+ */
+const DECIDE_FRAMING_TOKENS = 128;
+
+/** Options are lettered, so a question has at most this many. */
+const DECIDE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** The fixed instruction every decision runs under. */
+const DECIDE_SYSTEM_PROMPT =
+  "You answer multiple-choice questions about the state the user shows you. " +
+  "Read the state and the question, then reply with the letter of the one option that fits best.";
+
+const DECIDE_ANSWER_PREFIX = "Answer:";
+
+export class LlamaCppProvider implements DecisionProvider {
   private readonly uri: string;
   private readonly runtime: LlamaRuntime;
   private readonly thoughtTokens: number;
@@ -255,7 +314,7 @@ export class LlamaCppProvider implements InferenceProvider {
     // A fresh session per call: the contract is single-shot, and reusing one
     // would leak the previous run's turns into this one's context. Its context
     // is created here, where the prompt is known, so it is sized to the prompt.
-    const plan = await this.contextFor(model, systemPrompt, req.user);
+    const plan = await this.contextFor(model, systemPrompt, [req.user]);
     const session = await model.createSession(systemPrompt, plan.contextSize);
     // With no maxTokens, the response is capped at the room the context has
     // left. Uncapped, a long answer fills the context and node-llama-cpp shifts
@@ -300,6 +359,83 @@ export class LlamaCppProvider implements InferenceProvider {
   }
 
   /**
+   * Probabilities over each question's options, read from the model's
+   * next-token distribution after a lettered prompt. One session serves every
+   * question, so the state is evaluated once. ADR 01016.
+   */
+  async decide(req: DecideRequest): Promise<DecideResponse> {
+    validateDecideRequest(req);
+    const questions = Object.entries(req.questions);
+    for (const [id, question] of questions) {
+      const count = Object.keys(question.criteria).length;
+      if (count > DECIDE_LETTERS.length) {
+        throw new InferenceError(
+          `llama-cpp decide() question "${id}" has ${count} criteria; it letters ` +
+            `options A to Z, so ${DECIDE_LETTERS.length} at most.`,
+        );
+      }
+    }
+    const state =
+      typeof req.state === "string" ? req.state : JSON.stringify(req.state, null, 2);
+    const prompts = questions.map(([, question]) => decisionPrompt(state, question));
+
+    const model = await this.load();
+    const plan = await this.contextFor(
+      model,
+      DECIDE_SYSTEM_PROMPT,
+      prompts,
+      DECIDE_ANSWER_TOKENS,
+    );
+    const session = await model.createSession(DECIDE_SYSTEM_PROMPT, plan.contextSize);
+    try {
+      if (!session.decide) {
+        throw new InferenceError(
+          "This llama-cpp runtime's sessions have no decide(), so the provider " +
+            "cannot answer decisions.",
+        );
+      }
+      const result = await session.decide({
+        prompts,
+        answerPrefix: DECIDE_ANSWER_PREFIX,
+        labels: questions.map(([, question]) => lettersFor(question)),
+      });
+      const answers = Object.fromEntries(
+        questions.map(([id, question], i) => {
+          const options = Object.keys(question.criteria);
+          const weights = result.weights[i] ?? {};
+          const byOption = Object.fromEntries(
+            options.map((option, j) => [option, weights[DECIDE_LETTERS[j]!] ?? 0]),
+          );
+          return [id, normalizeDecision(options, byOption)];
+        }),
+      );
+      return { answers, ...(result.usage ? { usage: result.usage } : {}) };
+    } finally {
+      await session.dispose().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Tokens a decision accepts for its state plus its longest question: the
+   * most `decide` lets a context hold, less the fixed instruction, the chat
+   * template's overhead, the answer, and the provider's own framing. The same
+   * arithmetic `contextFor` refuses by, so a state within it is never refused.
+   */
+  async stateLimit(): Promise<number> {
+    const model = await this.load();
+    const ceiling = this.contextSize ?? model.trainContextSize ?? DEFAULT_CONTEXT_SIZE;
+    const system = model.countTokens ? await model.countTokens(DECIDE_SYSTEM_PROMPT) : 0;
+    return Math.max(
+      0,
+      ceiling -
+        system -
+        CHAT_TEMPLATE_OVERHEAD_TOKENS -
+        DECIDE_ANSWER_TOKENS -
+        DECIDE_FRAMING_TOKENS,
+    );
+  }
+
+  /**
    * The context this call needs: both prompts in the model's own tokens, the
    * chat template's overhead, and room for the response. A prompt that does not
    * fit is refused here, before anything is created. llama.cpp would otherwise
@@ -308,7 +444,10 @@ export class LlamaCppProvider implements InferenceProvider {
   private async contextFor(
     model: LlamaLoadedModel,
     systemPrompt: string,
-    user: string,
+    /** The user prompts the session holds, one at a time; the longest counts. */
+    users: string[],
+    /** A fixed response size, for a call `maxTokens` does not bound. */
+    responseTokens?: number,
   ): Promise<{ contextSize: number; promptTokens?: number }> {
     const ceiling = model.trainContextSize;
     const fallback =
@@ -318,11 +457,15 @@ export class LlamaCppProvider implements InferenceProvider {
         : DEFAULT_CONTEXT_SIZE);
     if (!model.countTokens) return { contextSize: fallback };
 
-    const [system, prompt] = await Promise.all([
-      model.countTokens(systemPrompt),
-      model.countTokens(user),
-    ]);
+    const countTokens = model.countTokens.bind(model);
+    const [system = 0, ...counts] = await Promise.all(
+      [systemPrompt, ...users].map((text) => countTokens(text)),
+    );
+    const prompt = Math.max(0, ...counts);
+    // A decision reads one token, so maxTokens and thinking do not bound it.
+    const bounded = responseTokens == null && this.maxTokens != null;
     const response =
+      responseTokens ??
       (this.maxTokens ?? DEFAULT_RESPONSE_RESERVE_TOKENS) + this.thoughtTokens;
     const promptTokens = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS;
     const needed = promptTokens + response;
@@ -336,8 +479,9 @@ export class LlamaCppProvider implements InferenceProvider {
         throw new InferenceError(
           `llama-cpp prompt needs ${needed} tokens of context, more than ` +
             `llamaCpp.contextSize (${this.contextSize}). ${counted} Raise ` +
-            `llamaCpp.contextSize, ${this.maxTokens != null ? "lower" : "set"} ` +
-            `llamaCpp.maxTokens, or leave contextSize unset so the context is sized to the prompt.`,
+            `llamaCpp.contextSize, ${
+              responseTokens != null ? "" : `${bounded ? "lower" : "set"} llamaCpp.maxTokens, `
+            }or leave contextSize unset so the context is sized to the prompt.`,
         );
       }
       return { contextSize: this.contextSize, promptTokens };
@@ -346,7 +490,7 @@ export class LlamaCppProvider implements InferenceProvider {
       throw new InferenceError(
         `llama-cpp prompt needs ${needed} tokens of context, more than this ` +
           `model's training context of ${ceiling} tokens. ${counted} Shorten the ` +
-          `prompt${this.maxTokens != null ? ", or lower llamaCpp.maxTokens" : ""}.`,
+          `prompt${bounded ? ", or lower llamaCpp.maxTokens" : ""}.`,
       );
     }
     return { contextSize: Math.max(fallback, needed), promptTokens };
@@ -375,6 +519,24 @@ export class LlamaCppProvider implements InferenceProvider {
     loadedModels.set(this.cacheKey, guarded);
     return guarded;
   }
+}
+
+/**
+ * One question's user turn. The state comes first, so every question of a
+ * request opens with the same text and the runtime evaluates it once.
+ */
+function decisionPrompt(state: string, question: DecideQuestion): string {
+  const options = Object.entries(question.criteria)
+    .map(([id, meaning], i) => `${DECIDE_LETTERS[i]!}. ${meaning || id}`)
+    .join("\n");
+  return (
+    `# State\n\n${state}\n\n# Question\n\n${question.instructions}\n\n${options}\n\n` +
+    `Reply with the letter of one option.`
+  );
+}
+
+function lettersFor(question: DecideQuestion): string[] {
+  return [...DECIDE_LETTERS.slice(0, Object.keys(question.criteria).length)];
 }
 
 /**

@@ -186,9 +186,24 @@ interface LlamaLoadedModel {
 
 interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  decide?(options: LlamaDecideOptions): Promise<LlamaDecideResult>;   // for decide()
   dispose(): Promise<void>;
   readonly contextSize?: number;   // tokens of context actually created
 }
+
+interface LlamaDecideOptions {
+  prompts: string[];      // one user turn per question
+  answerPrefix: string;   // the assistant turn opens with this; the next token is the answer
+  labels: string[][];     // per prompt, the labels whose next-token probability is read
+}
+
+interface LlamaDecideResult {
+  weights: Record<string, number>[];   // per prompt, label -> next-token probability
+  usage?: TokenUsage;
+  reuse?: LlamaDecideReuse;            // absent for a single question
+}
+
+type LlamaDecideReuse = "erase" | "checkpoint" | "reevaluate";
 
 interface LlamaPromptOptions {
   schema: Record<string, unknown>;
@@ -230,7 +245,7 @@ because its tokenizer lives in the worker.
 ## `LlamaCppProvider`
 
 ```ts
-class LlamaCppProvider implements InferenceProvider {
+class LlamaCppProvider implements DecisionProvider {
   constructor(model: string, options?: LlamaCppProviderOptions);
 }
 
@@ -276,6 +291,60 @@ memory allowed. For `granite-4.1-3b-q2`, trained on 131072 tokens, a one-field p
 tokens took 12.9 GB on CPU. With the 8192-token default the same call takes 2.85 GB.
 [ADR 01011](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01011-size-the-local-context-to-the-prompt.md)
 records the measurements and the options weighed.
+
+### Decisions
+
+`LlamaCppProvider` is a [decision provider](/inference/reference/providers/#decisions). `decide()`
+reads the model's own probability for each option, so `confidence` is a measurement, not generated
+text.
+
+Each question becomes one user turn under a fixed system prompt. The options are lettered A, B, C in
+`criteria` order, each shown with its meaning (or its id, when the meaning is empty). The state comes
+first, as given when it is a string and as indented JSON otherwise:
+
+```text
+# State
+
+<state>
+
+# Question
+
+<instructions>
+
+A. <meaning of the first option>
+B. <meaning of the second option>
+
+Reply with the letter of one option.
+```
+
+The model's chat template wraps the turn, and the assistant's turn opens with `Answer:`. The
+provider reads the next-token probability of each letter, summed over the letter's token with and
+without a leading space, and [normalizes](/inference/reference/providers/#decisions) them over the
+options. Thinking is off: Qwen3 and Qwen3.5 get the empty think block their template uses for that,
+and Gemma 4 gets its non-reasoning prompt. Nothing is generated, so `usage.outputTokens` is 0.
+
+Every question of a request runs on one session, and the state is evaluated once. After each
+question the session returns to the end of the state, which the runtime reports as `reuse`:
+
+| `reuse` | How | Models |
+|---|---|---|
+| `"erase"` | the question's tokens are removed from the context | attention models, such as Granite 4.1 |
+| `"checkpoint"` | the state is restored from a snapshot taken after it | hybrid and recurrent models, such as Qwen3.5 |
+| `"reevaluate"` | the state is evaluated again | a model that can do neither |
+
+The answers are the same either way; only the cost differs. `reuse` is on the runtime's result, not
+on `DecideResponse`. Wrap `defaultLlamaRuntime()` to see it, as the live suite does.
+
+The context is sized as for `completeJSON`, with the longest question's prompt as the user prompt
+and 8 tokens for the answer. `stateLimit()` returns the tokens left for the state plus the longest
+question: the training context, or `contextSize` when set, less the system prompt, the 512-token
+template overhead, the answer, and 128 tokens for the provider's own headings and letters. A
+request within it is never refused. A question has at most 26 options.
+
+On an RTX 4090 with CUDA, a three-question decision on `qwen3.5-4b` takes about 160 ms a question
+once the weights are loaded. On the CPU it takes about 11 s a question.
+[ADR 01016](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01016-decide-on-local-models-from-letter-probabilities.md)
+records the design.
 
 ## The worker process and the backend
 

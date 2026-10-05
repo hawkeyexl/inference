@@ -16,6 +16,7 @@ import {
   LLAMA_MODELS,
   LlamaCppProvider,
   aliasForTier,
+  canDecide,
   costOfRuns,
   defaultLlamaModelsDirectory,
   defaultLlamaRuntime,
@@ -26,7 +27,7 @@ import {
   resolveLlamaModelRef,
   resolveProviderIdentityAsync,
 } from "../../src/index.js";
-import type { LlamaRuntime } from "../../src/index.js";
+import type { LlamaDecideResult, LlamaRuntime } from "../../src/index.js";
 
 const live = process.env["INFERENCE_LIVE_LLAMA"] ? describe : describe.skip;
 
@@ -197,6 +198,105 @@ live("live llama-cpp provider", () => {
       expect(error).toBeInstanceOf(InferenceError);
       expect((error as Error).message).toMatch(/training context of 131072 tokens/);
       expect(sizes).toEqual([]);
+    }, TIMEOUT);
+  });
+
+  // Decisions read the model's next-token probabilities over option letters.
+  // Only real weights show whether the template's thinking is really off (a
+  // thought block would take the mass a letter should get) and which way the
+  // sequence returns to the shared state between questions: Qwen3.5 is a
+  // hybrid model, so it cannot simply erase. ADR 01016.
+  describe("decisions, against the real binding", () => {
+    const model = process.env["INFERENCE_LIVE_DECIDE_MODEL"] ?? "qwen3.5-4b";
+
+    function recordingRuntime(): { runtime: LlamaRuntime; results: LlamaDecideResult[] } {
+      const results: LlamaDecideResult[] = [];
+      const real = defaultLlamaRuntime();
+      return {
+        results,
+        runtime: {
+          ...real,
+          async loadModel(path) {
+            const loaded = await real.loadModel(path);
+            return {
+              ...loaded,
+              async createSession(systemPrompt, contextSize) {
+                const session = await loaded.createSession(systemPrompt, contextSize);
+                return {
+                  ...session,
+                  async decide(options) {
+                    const result = await session.decide!(options);
+                    results.push(result);
+                    return result;
+                  },
+                };
+              },
+            };
+          },
+        },
+      };
+    }
+
+    it("answers clear questions with the right option, reusing the shared state", async () => {
+      await disposeLlamaModels();
+      const { runtime, results } = recordingRuntime();
+      const provider = new LlamaCppProvider(model, { runtime });
+      expect(canDecide(provider)).toBe(true);
+      const request = {
+        state:
+          "The cat sat on the mat. Then the agent ran `git commit --no-verify`, " +
+          "which skips the repository's pre-commit hook.",
+        questions: {
+          animal: {
+            type: "choice" as const,
+            instructions: "Which animal does the state mention?",
+            criteria: { dog: "A dog.", cat: "A cat.", bird: "A bird." },
+          },
+          hooks: {
+            type: "choice" as const,
+            instructions: "Did the agent skip a git hook?",
+            criteria: { yes: "Yes, it skipped one.", no: "No, it ran every hook." },
+          },
+          weather: {
+            type: "choice" as const,
+            instructions: "Does the state say it was raining?",
+            criteria: { yes: "Yes.", no: "No, the state says nothing about rain." },
+          },
+        },
+      };
+      await provider.decide(request); // loads the weights; not timed
+      const started = performance.now();
+      const response = await provider.decide(request);
+      const elapsed = performance.now() - started;
+      const result = results[1]!;
+      console.log(
+        `decide on ${model}: ${elapsed.toFixed(0)} ms for 3 questions ` +
+          `(${(elapsed / 3).toFixed(0)} ms each), reuse ${String(result.reuse)}, ` +
+          `${String(response.usage?.inputTokens)} input tokens`,
+      );
+
+      expect(response.answers["animal"]!.choice).toBe("cat");
+      expect(response.answers["hooks"]!.choice).toBe("yes");
+      expect(response.answers["weather"]!.choice).toBe("no");
+      for (const answer of Object.values(response.answers)) {
+        expect(answer.confidence).toBeGreaterThan(0.5);
+      }
+      // Most of the model's next-token mass is on the letters: it answered,
+      // rather than opening a thought block or restating the question.
+      for (const weights of result.weights) {
+        const mass = Object.values(weights).reduce((sum, p) => sum + p, 0);
+        expect(mass).toBeGreaterThan(0.5);
+      }
+      expect(["erase", "checkpoint", "reevaluate"]).toContain(result.reuse);
+      expect(response.usage?.outputTokens).toBe(0);
+    }, TIMEOUT);
+
+    it("reports a state limit inside the training context", async () => {
+      const provider = new LlamaCppProvider(model);
+      const limit = await provider.stateLimit();
+      expect(limit).toBeGreaterThan(8192);
+      // Qwen3.5 and Granite 4.1 train on 262144 and 131072 tokens.
+      expect(limit).toBeLessThan(262_144);
     }, TIMEOUT);
   });
 

@@ -105,6 +105,9 @@ export {
 } from "./providers/llama-cpp.js";
 export type {
   LlamaCppProviderOptions,
+  LlamaDecideOptions,
+  LlamaDecideResult,
+  LlamaDecideReuse,
   LlamaGpu,
   LlamaLoadedModel,
   LlamaPromptOptions,
