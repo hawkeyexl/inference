@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.1](https://github.com/hawkeyexl/inference/compare/v0.4.0...v0.5.0-decide-and-host.1) (2026-10-05)
+
+
+### Features
+
+* **decide:** add decisions as an optional provider capability ([4163e99](https://github.com/hawkeyexl/inference/commit/4163e990253292b6ed994337572715c9908c3689))
+
 # [0.4.0](https://github.com/hawkeyexl/inference/compare/v0.3.2...v0.4.0) (2026-10-03)
 
 
