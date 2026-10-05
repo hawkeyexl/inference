@@ -1,3 +1,16 @@
+# [0.5.0-decide-and-host.2](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.1...v0.5.0-decide-and-host.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* **jev:** drop the price table entry ([7486e9d](https://github.com/hawkeyexl/inference/commit/7486e9d7878325cda838d45ca346f1b9982bb664))
+
+
+### Features
+
+* **jev:** add the jev provider, a hosted decision provider for TypeSafe's Jev ([cab2bcc](https://github.com/hawkeyexl/inference/commit/cab2bccf1db376dbef5b88437314f9242fff342f))
+* **llama-cpp:** add ensureModel, modelState and fits to prepare a local model without loading it ([b7a46ee](https://github.com/hawkeyexl/inference/commit/b7a46ee75ea1ae2410c41eb40539baccef9da550))
+
 # [0.5.0-decide-and-host.1](https://github.com/hawkeyexl/inference/compare/v0.4.0...v0.5.0-decide-and-host.1) (2026-10-05)
 
 
