@@ -12,6 +12,7 @@ import type { Pricing } from "../cost.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { OpenAICompatProvider } from "./openai-compat.js";
 import { ClaudeCliProvider } from "./claude-cli.js";
+import { JevProvider } from "./jev.js";
 import { MockProvider } from "./mock.js";
 import { LlamaCppProvider, defaultLlamaRuntime } from "./llama-cpp.js";
 import {
@@ -24,6 +25,7 @@ import {
 } from "./llama-models.js";
 import { detectProvider, warnPendingDownload } from "./detect.js";
 import type { AnthropicProviderOptions } from "./anthropic.js";
+import type { JevProviderOptions } from "./jev.js";
 import type { OpenAICompatProviderOptions } from "./openai-compat.js";
 import type { MockDecisions, MockResponse } from "./mock.js";
 import type {
@@ -38,6 +40,7 @@ export type ProviderName =
   | "anthropic"
   | "openai"
   | "claude-cli"
+  | "jev"
   | "mock"
   | "llama-cpp";
 
@@ -55,11 +58,11 @@ export interface ProviderSpec {
   model?: string | null;
   /** Env var NAME holding the API key; null/undefined selects the default. */
   apiKeyEnv?: string | null;
-  /** openai only. */
+  /** openai and jev. */
   baseUrl?: string;
   /** claude-cli only: the executable to run. */
   command?: string;
-  /** claude-cli only: subprocess timeout. */
+  /** claude-cli: subprocess timeout. jev: request timeout. */
   timeoutMs?: number;
   /**
    * Pricing override for this model. Not used to construct the provider —
@@ -70,6 +73,7 @@ export interface ProviderSpec {
   /** Provider-specific tuning, ignored by the other providers. */
   anthropic?: AnthropicProviderOptions;
   openai?: OpenAICompatProviderOptions;
+  jev?: JevProviderOptions;
   llamaCpp?: LlamaCppProviderOptions;
   /** Test seam for the claude-cli provider. */
   exec?: ExecFn;
@@ -87,6 +91,9 @@ export const DEFAULT_MODELS: Record<ProviderName, string> = {
   anthropic: "claude-sonnet-4-5",
   openai: "gpt-4o-mini",
   "claude-cli": "claude-sonnet-4-5",
+  // The alias TypeSafe moves to its newest stable Jev. A decision provider
+  // only: it never answers `completeJSON`, and detection never picks it.
+  jev: "jev-latest",
   mock: "mock-model",
   // A selector, not a pinned model: which weights a tier points at is then a
   // catalog change rather than an API change. Resolving it needs the async
@@ -97,6 +104,7 @@ export const DEFAULT_MODELS: Record<ProviderName, string> = {
 const DEFAULT_API_KEY_ENV: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
+  jev: "TYPESAFE_API_KEY",
 };
 
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -245,6 +253,12 @@ export function makeProvider(spec: ProviderSpec): InferenceProvider {
         undefined,
         spec.openai ?? {},
       );
+    case "jev":
+      return new JevProvider(model, spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV["jev"]!, {
+        ...(spec.jev ?? {}),
+        ...(spec.baseUrl !== undefined ? { baseUrl: spec.baseUrl } : {}),
+        ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
+      });
     case "claude-cli":
       return new ClaudeCliProvider(
         model,

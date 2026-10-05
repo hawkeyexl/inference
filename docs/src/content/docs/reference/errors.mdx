@@ -64,7 +64,7 @@ machine with no credentials — see
 No provider specified. Detecting one probes the environment, the Claude CLI and the local
 model runtime, which cannot be done synchronously — use
 resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai,
-claude-cli, mock, llama-cpp).
+claude-cli, jev, mock, llama-cpp).
 ```
 
 You called the **synchronous** `makeProvider` or `resolveProviderIdentity` with `provider` omitted
@@ -76,7 +76,7 @@ or set to `"auto"`.
 
 ```text
 Model "gpt-4o-mini" was given without a provider, and a model name does not say which
-provider owns it. Name the provider too (anthropic, openai, claude-cli, mock, llama-cpp),
+provider owns it. Name the provider too (anthropic, openai, claude-cli, jev, mock, llama-cpp),
 or drop the model to take the detected provider's default.
 ```
 
@@ -139,6 +139,68 @@ The install exceeded 15 minutes. On a platform without a prebuilt binary this is
 a slow machine can genuinely exceed it.
 
 **Fix:** retry, raise `timeoutMs`, or install it yourself.
+
+### `Jev provider needs <VAR> set (or choose another provider)`
+
+The Jev provider was constructed and `process.env[apiKeyEnv]` was empty. `<VAR>` is
+`TYPESAFE_API_KEY` unless you set `apiKeyEnv`.
+
+**Fix:** export the key, or name a different provider.
+
+### `The jev provider answers decisions only and cannot generate JSON.`
+
+`completeJSON` was called on a `jev` provider. Jev returns a probability for each option and
+generates no text.
+
+**Fix:** check `canDecide(provider)` and call `decide()`, or choose another provider for
+`completeJSON`.
+
+### `decide() question "<Q>" has <N> criteria; Jev accepts at most 255.`
+
+A question has more options than Jev's limit.
+
+**Fix:** split the question, or group the options.
+
+### `Jev rejected the API key (HTTP 401). Check <VAR>`
+
+Jev answered 401. The message names the variable the key was read from and, when Jev explained,
+what it said.
+
+**Fix:** check that `<VAR>` holds a current key.
+
+### `Jev rejected the request as invalid (HTTP 422)`
+
+Jev validated the request and refused it. The message ends with Jev's own reason.
+
+**Fix:** act on that reason. A question with fewer than two options, or state beyond the 32000-token
+limit, are the usual causes.
+
+### `Jev rate limit exceeded (HTTP 429). Retry with backoff` and `Jev is overloaded (HTTP 529). Retry with backoff`
+
+Jev is limiting you or is short of capacity. The library does not retry a decision for you.
+
+**Fix:** retry with backoff.
+
+### `Jev request failed with HTTP <N>`
+
+Any other non-success status. The message ends with Jev's reason or the start of its body.
+
+**Fix:** read the reason. A 5xx is Jev's, and retrying is reasonable.
+
+### `Jev request failed: <REASON>` and `Jev request timed out after <N>ms.`
+
+The request did not complete. `<REASON>` is the network error. The timeout is `timeoutMs`, 60000
+unless you set it.
+
+**Fix:** check connectivity and `baseUrl`, or raise `timeoutMs`.
+
+### `Jev returned a response this library cannot read: <WHY>.`
+
+Jev answered 200 with a body that is not JSON, or lacks the answer, its type or its probabilities
+for a question you asked. A probability for an option the question did not have fails with the
+`Decision weight names "<O>", which is not one of the question's criteria` message instead.
+
+**Fix:** report it with the request. If `baseUrl` points at a proxy, check what it returns.
 
 ### `Timed out waiting for another process to install node-llama-cpp into <DIR>`
 
@@ -209,7 +271,7 @@ or `false`. Thrown when the provider is constructed.
 **Fix:** use one of the listed values, or leave it unset so `NODE_LLAMA_CPP_GPU` decides, and
 failing that `"auto"`. The CPU is `false`, not `"cpu"`.
 
-### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, mock, llama-cpp.`
+### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, jev, mock, llama-cpp.`
 
 A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
 

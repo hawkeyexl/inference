@@ -123,7 +123,7 @@ carry an executed code sample.
 
 | Page | CUJ | ★ | Notes |
 |---|---|:--:|---|
-| `reference/providers.mdx` | R2, X1 | ★ | Every `ProviderSpec` field, the per-provider options interfaces, `DEFAULT_MODELS`, the factories, `MockProvider`, and the schema helpers. |
+| `reference/providers.mdx` | R2, X1 | ★ | Every `ProviderSpec` field, the per-provider options interfaces, `DEFAULT_MODELS`, the factories, `JevProvider`, `MockProvider`, and the schema helpers. |
 | `reference/completion.mdx` | M1 | ★ | `completeValidatedJSON`, `CompleteValidatedOptions`, `InferenceRun`, `validatorFor`. |
 | `reference/judge.mdx` | P1, P4 | ★ | `judge`, `runEnsemble`, `EnsembleOptions`, `computeConsensus`, `zoneFor`, `ConsensusResult`, `JudgeRun`, `JudgeVerdict`, `VERDICT_SCHEMA`, `DEFAULT_ZONES`, `resetTemperatureWarning`. |
 | `reference/cache.mdx` | P2, U1 | ★ | `JsonCache` constructor arity, `buildCacheKey`, `sha256`, and the on-disk file format. |
@@ -151,7 +151,7 @@ Reference pages must never contradict the source. Cross-read the paired files be
 
 | Reference page | Source files |
 |---|---|
-| `reference/providers.mdx` | `src/providers/index.ts`, `src/providers/types.ts`, `src/providers/anthropic.ts`, `src/providers/openai-compat.ts`, `src/providers/claude-cli.ts`, `src/providers/mock.ts` |
+| `reference/providers.mdx` | `src/providers/index.ts`, `src/providers/types.ts`, `src/providers/anthropic.ts`, `src/providers/openai-compat.ts`, `src/providers/claude-cli.ts`, `src/providers/jev.ts`, `src/providers/mock.ts` |
 | `reference/completion.mdx` | `src/complete.ts` |
 | `reference/judge.mdx` | `src/judge/ensemble.ts`, `src/judge/consensus.ts`, `src/judge/zones.ts`, `src/judge/types.ts`, `src/judge/verdict-schema.json` |
 | `reference/cache.mdx` | `src/cache.ts` |

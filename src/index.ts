@@ -68,6 +68,8 @@ export {
 } from "./providers/openai-compat.js";
 export type { OpenAICompatProviderOptions } from "./providers/openai-compat.js";
 export { ClaudeCliProvider } from "./providers/claude-cli.js";
+export { DEFAULT_JEV_BASE_URL, JevProvider } from "./providers/jev.js";
+export type { JevProviderOptions } from "./providers/jev.js";
 export { MockProvider, mockVerdict } from "./providers/mock.js";
 export type {
   MockDecision,

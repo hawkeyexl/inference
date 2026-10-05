@@ -90,25 +90,26 @@ if (canDecide(provider)) {
 }
 ```
 
-Of the built-in providers, `MockProvider` decides. See [mock](#mock).
+Of the built-in providers, `JevProvider` and `MockProvider` decide. See [Jev](#jev) and [mock](#mock).
 
 ## `ProviderSpec`
 
 ```ts
-type ProviderName = "anthropic" | "openai" | "claude-cli" | "mock" | "llama-cpp";
+type ProviderName = "anthropic" | "openai" | "claude-cli" | "jev" | "mock" | "llama-cpp";
 type ProviderSelector = ProviderName | "auto";
 
 interface ProviderSpec {
   provider?: ProviderSelector;   // omit or "auto" to detect; needs makeProviderAsync
   model?: string | null;         // null/undefined -> per-provider default
   apiKeyEnv?: string | null;     // null/undefined -> the provider's default var
-  baseUrl?: string;              // openai only
+  baseUrl?: string;              // openai and jev
   command?: string;              // claude-cli only, default "claude"
-  timeoutMs?: number;            // claude-cli only, default 180000
+  timeoutMs?: number;            // claude-cli: default 180000. jev: default 60000
   pricing?: Pricing;             // not used to construct; carried so one object
                                  // serves both makeProvider and pricingFor
   anthropic?: AnthropicProviderOptions;
   openai?: OpenAICompatProviderOptions;
+  jev?: JevProviderOptions;
   llamaCpp?: LlamaCppProviderOptions;
   exec?: ExecFn;                 // test seam for claude-cli
   llamaRuntime?: LlamaRuntime;   // test seam for llama-cpp
@@ -147,6 +148,7 @@ case, so you can switch over wholesale.
 ```ts
 const DEFAULT_MODELS: Record<ProviderName, string>;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_JEV_BASE_URL = "https://api.typesafe.ai";
 ```
 
 | Provider | Default model | Default key variable |
@@ -154,6 +156,7 @@ const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 | `anthropic` | `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
 | `claude-cli` | `claude-sonnet-4-5` | — (local CLI auth) |
+| `jev` | `jev-latest` | `TYPESAFE_API_KEY` |
 | `mock` | `mock-model` | — |
 | `llama-cpp` | `auto` | — |
 
@@ -169,6 +172,8 @@ function resetClaudeCliProbe(): void;            // test seam
 
 `DETECTION_ORDER` is `["anthropic", "openai", "claude-cli", "llama-cpp"]`. `mock` is deliberately
 absent — it answers `{ json: {} }` unless scripted, which would sail through as a non-error result.
+`jev` is absent too: it needs a paid key and answers decisions only, so it cannot stand in for a
+provider that answers `completeJSON`. Name it to use it.
 
 `detectProvider` returns the first available provider and throws an `InferenceError` naming every
 provider and why each was unavailable. `availableProviders` returns all of them, in priority order.
@@ -193,6 +198,12 @@ interface AnthropicProviderOptions {
 
 interface OpenAICompatProviderOptions {
   schemaName?: string;      // default "result" — also prompt surface
+}
+
+interface JevProviderOptions {
+  baseUrl?: string;         // default DEFAULT_JEV_BASE_URL
+  timeoutMs?: number;       // default 60000
+  fetch?: typeof fetch;     // test seam
 }
 
 interface LlamaCppProviderOptions {
@@ -221,6 +232,9 @@ class OpenAICompatProvider implements InferenceProvider {
 class ClaudeCliProvider implements InferenceProvider {
   constructor(model: string, command?: string, exec?: ExecFn, timeoutMs?: number);
 }
+class JevProvider implements DecisionProvider {
+  constructor(model: string, apiKeyEnv: string, options?: JevProviderOptions);
+}
 class MockProvider implements DecisionProvider {
   readonly requests: CompleteJSONRequest[];
   readonly decideRequests: DecideRequest[];
@@ -243,6 +257,32 @@ concrete arguments.
 - **`ClaudeCliProvider`** runs `claude -p --append-system-prompt <system> --output-format json
   --model <model>`, sends the user prompt and restated schema over **stdin**, and unwraps a
   `{ result: string }` envelope. Reports **no usage**.
+
+## Jev
+
+`jev` is TypeSafe's hosted Jev model, reached through its System One API. It is a
+`DecisionProvider` and nothing else: it returns a probability for each option and generates no
+text. The request shape in [Decisions](#decisions) is Jev's own, so a request is forwarded as is.
+
+```ts
+const provider = makeProvider({ provider: "jev" });   // needs TYPESAFE_API_KEY
+if (canDecide(provider)) {
+  const { answers, usage } = await provider.decide(request);
+}
+```
+
+- It posts to `<baseUrl>/v1/systemone` with `Authorization: Bearer <key>`. `baseUrl` defaults to
+  `https://api.typesafe.ai`.
+- A question's `criteria` is sent as an object of option id to meaning, exactly as given.
+- `stateLimit()` is 32000 tokens, Jev's limit for the state plus the longest question.
+- A question may have at most 255 options.
+- Jev's probabilities pass through the same normalization as every other provider, so `choice` and
+  `confidence` follow the [decision rule](#decisions) and not Jev's own fields.
+- `usage` is Jev's input and output token counts.
+- `completeJSON` rejects with an `InferenceError`. Detection never picks `jev`.
+
+The default model `jev-latest` is an alias TypeSafe re-points to its newest stable Jev, so a
+cache key naming it does not pin the weights. Pass a pinned name such as `jev-1.13.0` for that.
 
 ## Mock
 
