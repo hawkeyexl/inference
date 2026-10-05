@@ -27,6 +27,8 @@ import {
 } from "./llama-models.js";
 import { createWorkerRuntime, isLlamaGpu, shutdownLlamaWorkers } from "./llama-host.js";
 import { normalizeDecision, validateDecideRequest } from "./decide.js";
+import { DEFAULT_KEEP_ALIVE_MS, callModelHost } from "./model-host.js";
+import type { HostRoute, ModelHostMode } from "./model-host.js";
 import type { DecideQuestion, DecideRequest, DecideResponse, DecisionProvider } from "./decide.js";
 import type { LlamaGpu } from "./llama-host.js";
 import type {
@@ -36,6 +38,7 @@ import type {
 } from "./types.js";
 
 export type { LlamaGpu } from "./llama-host.js";
+export type { ModelHostMode } from "./model-host.js";
 
 export interface LlamaPromptOptions {
   /** JSON Schema converted to a GBNF grammar by the runtime. */
@@ -176,6 +179,30 @@ export interface LlamaCppProviderOptions {
    * it is an error. Ignored when `runtime` is injected. ADR 01012.
    */
   gpu?: LlamaGpu;
+  /**
+   * Where calls run. `"off"` (the default): in this process's own worker.
+   * `"connect"`: in a running model host, which keeps the model loaded across
+   * processes, else as `"off"`. `"spawn"`: in a model host, starting one
+   * when none runs. Ignored when `runtime` is injected. ADR 01017.
+   */
+  host?: ModelHostMode;
+  /**
+   * Milliseconds the model host keeps the model loaded after this provider's
+   * last call, when no lease holds it. Default 600000; 0 unloads it as soon as
+   * nothing holds it and nothing waits for it.
+   */
+  keepAlive?: number;
+  /**
+   * A lease name. Each call through the host takes or renews this session's
+   * lease, which keeps the model loaded until the lease goes unused for its
+   * keepAlive, or `releaseModelHost({ session })` drops it.
+   */
+  session?: string;
+  /**
+   * Milliseconds a call may wait in the model host's queue before it is
+   * withdrawn with `ModelHostBusyError`. Unset, it waits as long as it takes.
+   */
+  hostWaitMs?: number;
 }
 
 /**
@@ -196,6 +223,24 @@ const loadedModels = new Map<string, Promise<LlamaLoadedModel>>();
  * adding one to the contract would make all five providers carry a lifecycle
  * only this one has. Short-lived processes can skip it.
  */
+/** The key `loadedModels` holds a model under. For the model host. */
+export function llamaModelKey(directory: string, model: string): string {
+  return buildCacheKey([directory, resolveLlamaModelRef(model)]);
+}
+
+/** Whether the model under `key` is loaded, or loading. For the model host. */
+export function isLlamaModelLoaded(key: string): boolean {
+  return loadedModels.has(key);
+}
+
+/** Free one model's weights. For the model host. */
+export async function unloadLlamaModel(key: string): Promise<void> {
+  const loaded = loadedModels.get(key);
+  if (!loaded) return;
+  loadedModels.delete(key);
+  await loaded.then((m) => m.dispose()).catch(() => undefined);
+}
+
 export async function disposeLlamaModels(): Promise<void> {
   const pending = [...loadedModels.values()];
   loadedModels.clear();
@@ -261,6 +306,8 @@ export class LlamaCppProvider implements DecisionProvider {
    * back the wrong weights.
    */
   private readonly cacheKey: string;
+  /** Set when calls go through the model host. */
+  private readonly route: HostRoute | undefined;
 
   constructor(
     private readonly model: string,
@@ -288,6 +335,26 @@ export class LlamaCppProvider implements DecisionProvider {
           `got ${JSON.stringify(options.gpu) ?? String(options.gpu)}.`,
       );
     }
+    if (options.host !== undefined && !["off", "connect", "spawn"].includes(options.host)) {
+      throw new InferenceError(
+        `llamaCpp.host must be "off", "connect" or "spawn", ` +
+          `got ${JSON.stringify(options.host) ?? String(options.host)}.`,
+      );
+    }
+    for (const name of ["keepAlive", "hostWaitMs"] as const) {
+      const value = options[name];
+      if (value !== undefined && !(typeof value === "number" && value >= 0)) {
+        throw new InferenceError(
+          `llamaCpp.${name} must be a non-negative number of milliseconds, got ${String(value)}.`,
+        );
+      }
+    }
+    if (options.session !== undefined && !(typeof options.session === "string" && options.session)) {
+      throw new InferenceError(
+        `llamaCpp.session must be a non-empty string, ` +
+          `got ${JSON.stringify(options.session) ?? String(options.session)}.`,
+      );
+    }
     this.contextSize = options.contextSize;
     this.uri = resolveLlamaModelRef(model);
     this.runtime =
@@ -297,7 +364,25 @@ export class LlamaCppProvider implements DecisionProvider {
     this.maxTokens = options.maxTokens;
     this.modelsDirectory =
       options.modelsDirectory ?? defaultLlamaModelsDirectory();
-    this.cacheKey = buildCacheKey([this.modelsDirectory, this.uri]);
+    this.cacheKey = llamaModelKey(this.modelsDirectory, model);
+    const mode = options.host ?? "off";
+    this.route =
+      mode === "off" || options.runtime
+        ? undefined
+        : {
+            mode,
+            keepAliveMs: options.keepAlive ?? DEFAULT_KEEP_ALIVE_MS,
+            ...(options.session !== undefined ? { session: options.session } : {}),
+            ...(options.hostWaitMs !== undefined ? { waitMs: options.hostWaitMs } : {}),
+            model: {
+              model,
+              modelsDirectory: this.modelsDirectory,
+              thoughtTokens: this.thoughtTokens,
+              ...(options.gpu !== undefined ? { gpu: options.gpu } : {}),
+              ...(this.contextSize !== undefined ? { contextSize: this.contextSize } : {}),
+              ...(this.maxTokens !== undefined ? { maxTokens: this.maxTokens } : {}),
+            },
+          };
   }
 
   provider(): string {
@@ -309,6 +394,14 @@ export class LlamaCppProvider implements DecisionProvider {
   }
 
   async completeJSON(req: CompleteJSONRequest): Promise<CompleteJSONResponse> {
+    return this.route
+      ? callModelHost(this.route, { op: "completeJSON", request: req }, () =>
+          this.completeHere(req),
+        )
+      : this.completeHere(req);
+  }
+
+  private async completeHere(req: CompleteJSONRequest): Promise<CompleteJSONResponse> {
     const model = await this.load();
     const systemPrompt = systemPromptFor(req);
     // A fresh session per call: the contract is single-shot, and reusing one
@@ -375,6 +468,13 @@ export class LlamaCppProvider implements DecisionProvider {
         );
       }
     }
+    return this.route
+      ? callModelHost(this.route, { op: "decide", request: req }, () => this.decideHere(req))
+      : this.decideHere(req);
+  }
+
+  private async decideHere(req: DecideRequest): Promise<DecideResponse> {
+    const questions = Object.entries(req.questions);
     const state =
       typeof req.state === "string" ? req.state : JSON.stringify(req.state, null, 2);
     const prompts = questions.map(([, question]) => decisionPrompt(state, question));
@@ -422,6 +522,12 @@ export class LlamaCppProvider implements DecisionProvider {
    * arithmetic `contextFor` refuses by, so a state within it is never refused.
    */
   async stateLimit(): Promise<number> {
+    return this.route
+      ? callModelHost(this.route, { op: "stateLimit" }, () => this.stateLimitHere())
+      : this.stateLimitHere();
+  }
+
+  private async stateLimitHere(): Promise<number> {
     const model = await this.load();
     const ceiling = this.contextSize ?? model.trainContextSize ?? DEFAULT_CONTEXT_SIZE;
     const system = model.countTokens ? await model.countTokens(DECIDE_SYSTEM_PROMPT) : 0;

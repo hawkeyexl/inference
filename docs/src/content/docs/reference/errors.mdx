@@ -271,6 +271,38 @@ or `false`. Thrown when the provider is constructed.
 **Fix:** use one of the listed values, or leave it unset so `NODE_LLAMA_CPP_GPU` decides, and
 failing that `"auto"`. The CPU is `false`, not `"cpu"`.
 
+### `llamaCpp.host must be "off", "connect" or "spawn", got <X>.`
+
+`llamaCpp.host` was not one of the three modes. Thrown when the provider is constructed.
+
+**Fix:** use `"off"` (the default), `"connect"` or `"spawn"`. See
+[the model host](/inference/reference/local-models/#the-model-host).
+
+### `llamaCpp.keepAlive must be a non-negative number of milliseconds, got <X>.` — or `llamaCpp.hostWaitMs must be …`
+
+`keepAlive` or `hostWaitMs` was negative, `NaN`, or not a number. Thrown when the provider is
+constructed.
+
+**Fix:** pass milliseconds, `0` or more, or leave it unset for the default.
+
+### `llamaCpp.session must be a non-empty string, got <X>.`
+
+`llamaCpp.session` was empty or not a string. Thrown when the provider is constructed.
+
+**Fix:** name the session, for example with your own session id, or leave it unset.
+
+### `releaseModelHost needs { session } or { all: true }.`
+
+`releaseModelHost` was called with neither a non-empty `session` nor `all: true`.
+
+**Fix:** pass one of the two.
+
+### `leaseModelHost needs a non-empty session, got <X>.`
+
+`leaseModelHost` was called without a session to name the lease.
+
+**Fix:** pass `session`, the name later calls and `releaseModelHost` refer to.
+
 ### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, jev, mock, llama-cpp.`
 
 A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
@@ -475,6 +507,54 @@ Node could not fork the worker process: the OS refused a new process, or the Nod
 not be run again.
 
 **Fix:** read `<ERR>`. This is a machine-level failure, not a model one.
+
+### `The request for "<M>" waited <N> ms in the model host's queue without starting, so it was withdrawn (hostWaitMs). Nothing ran.`
+
+Thrown as `ModelHostBusyError`, a subclass of `InferenceError` whose `name` is
+`"ModelHostBusyError"`. The [model host](/inference/reference/local-models/#the-model-host) runs
+one call per model at a time, and this call was still waiting behind others when its `hostWaitMs`
+ran out. Nothing ran, so nothing was paid for. `completeValidatedJSON` and `judge` record it on
+`run.error`.
+
+**Fix:** match it by class or by `name` to skip the work or try again later, or raise
+`llamaCpp.hostWaitMs`, or leave it unset to wait as long as it takes.
+
+### `The model host did not start within <N> s. Its log is <LOG>.`
+
+A provider with `host: "spawn"`, or `leaseModelHost`, started a model host, and none answered in
+time. The host's stderr is in `<LOG>`, inside `<runtime dir>/host/`.
+
+**Fix:** read the log. A host that cannot listen on its pipe or socket, or cannot import the
+runtime, says so there.
+
+### `The model host exited twice while answering this request, so it was not answered. Its log is <LOG>.`
+
+In spawn mode, a host that dies mid-call is replaced and the call retried once. The replacement died
+too.
+
+**Fix:** read the log. Something is killing the host process, or it cannot run on this machine. Use
+`host: "off"` meanwhile.
+
+### `The model host exited while loading "<M>" for a lease. Its log is <LOG>.`
+
+`leaseModelHost` asked a host to load a model, and the host died first. A lease is not retried.
+
+**Fix:** read the log, then call `leaseModelHost` again.
+
+### `The model host was stopped by releaseModelHost({ all: true }) before this request ran.` — or `The model host is stopping and took no new requests.`
+
+`releaseModelHost({ all: true })` ran while this call was waiting in the host's queue, or arrived
+as the host was stopping. Nothing ran.
+
+**Fix:** run the call again. The next one starts a new host in spawn mode.
+
+### `The model host refused this client: its token does not match <FILE>.` — or `The model host does not know the operation <OP>.`
+
+A client reached the host's pipe or socket with the wrong token, or sent an operation this host
+does not serve. These should not appear between a client and a host from the same release.
+
+**Fix:** stop the host with `releaseModelHost({ all: true })`, or end its process, and retry. Check
+that only one version of this package uses the runtime directory.
 
 ### `The model has no single token for the answer label "<L>", so it cannot decide.`
 

@@ -28,3 +28,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01014](01014-model-lifecycle-helpers-for-the-local-provider.md) | Add `ensureModel`, `modelState` and `fits` so a consumer can prepare a local model without loading it |
 | [01015](01015-the-jev-decision-provider.md) | Add `jev`, a hosted decision provider, that is never auto-detected and never answers `completeJSON` |
 | [01016](01016-decide-on-local-models-from-letter-probabilities.md) | Decide on local models from the next-token probabilities of option letters, evaluating the shared state once |
+| [01017](01017-keep-local-models-loaded-in-a-model-host.md) | Keep local models loaded across processes in an opt-in model host |

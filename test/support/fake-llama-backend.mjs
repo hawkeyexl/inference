@@ -14,7 +14,8 @@
  *   abort          { cuda | vulkan | cpu: "init" | "load" | "prompt" | "decide" } — where that backend aborts
  *   throwOnPrompt  an ordinary error message every prompt throws
  *   delayMs        how long a prompt takes, so concurrent calls overlap
- *   log            a file each init, prompt and decision probe is appended to, for the test to read
+ *   log            a file each init, load, prompt and decision probe is appended to, for the test to read
+ *   memory         { total, perModel }: the memory budget is total, less perModel per loaded model
  *   decide         { sequence, answers } — how a session's context sequence behaves for decide():
  *                    sequence  "attention" (erasing tokens keeps the rest), "hybrid" (only a
  *                              checkpoint restores a prefix), or "hybrid-without-checkpoints"
@@ -22,8 +23,12 @@
  *                    answers   { "<text only one question holds>": { "<letter>": probability } }
  */
 import { appendFileSync, writeSync } from "node:fs";
+import { basename } from "node:path";
 
 const config = JSON.parse(process.env.FAKE_LLAMA ?? "{}");
+
+/** Models loaded and not yet disposed, for the memory budget. */
+let loaded = 0;
 
 const label = (gpu) => (gpu === false ? "cpu" : gpu);
 
@@ -59,10 +64,13 @@ export async function createWorkerBackend(options, hooks) {
 
   return {
     gpu,
-    memoryBudget: async () => 16e9,
+    memoryBudget: async () =>
+      config.memory ? config.memory.total - loaded * config.memory.perModel : 16e9,
     async loadModel(path) {
       if (abortAt === "load") crash(gpu);
       if (path.includes("missing")) throw new Error(`no such model file: ${path}`);
+      record(`load ${label(gpu)} ${process.pid} ${basename(path)}`);
+      loaded += 1;
       return {
         trainContextSize: 131_072,
         countTokens: (text) => Math.ceil(text.length / 4),
@@ -70,8 +78,8 @@ export async function createWorkerBackend(options, hooks) {
           return {
             contextSize,
             sequence: fakeSequence(systemPrompt, gpu, abortAt),
-            async prompt() {
-              record(`prompt ${label(gpu)} ${process.pid}`);
+            async prompt(text) {
+              record(`prompt ${label(gpu)} ${process.pid} ${encodeURIComponent(text)}`);
               if (config.delayMs) {
                 await new Promise((r) => setTimeout(r, config.delayMs));
               }
@@ -86,7 +94,9 @@ export async function createWorkerBackend(options, hooks) {
             async dispose() {},
           };
         },
-        async dispose() {},
+        async dispose() {
+          loaded -= 1;
+        },
       };
     },
   };

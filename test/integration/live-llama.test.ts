@@ -10,7 +10,12 @@
  *   npm i node-llama-cpp
  *   INFERENCE_LIVE_LLAMA=1 npx vitest run test/integration/live-llama.test.ts
  */
-import { describe, expect, it, afterAll } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { describe, expect, it, afterAll, beforeAll } from "vitest";
+import { setModelHostEntry } from "../../src/providers/model-host.js";
 import {
   InferenceError,
   LLAMA_MODELS,
@@ -23,7 +28,9 @@ import {
   disposeLlamaModels,
   judge,
   makeProviderAsync,
+  modelHostStatus,
   pricingFor,
+  releaseModelHost,
   resolveLlamaModelRef,
   resolveProviderIdentityAsync,
 } from "../../src/index.js";
@@ -297,6 +304,59 @@ live("live llama-cpp provider", () => {
       expect(limit).toBeGreaterThan(8192);
       // Qwen3.5 and Granite 4.1 train on 262144 and 131072 tokens.
       expect(limit).toBeLessThan(262_144);
+    }, TIMEOUT);
+  });
+
+  // The host from source, as the unit suite runs it, but over the real binding.
+  // INFERENCE_LIVE_HOST_MODEL picks the model; it defaults to the balanced tier.
+  describe("the model host, against the real binding", () => {
+    const hostModel = process.env["INFERENCE_LIVE_HOST_MODEL"] || aliasForTier("balanced");
+    const savedRuntimeDir = process.env["INFERENCE_RUNTIME_DIR"];
+
+    beforeAll(() => {
+      process.env["INFERENCE_RUNTIME_DIR"] = mkdtempSync(join(tmpdir(), "inference-live-host-"));
+      setModelHostEntry({
+        path: resolve("src/providers/llama-hostd.ts"),
+        execArgv: [
+          "--import",
+          pathToFileURL(resolve("test/support/ts-hooks.mjs")).href,
+          "--experimental-transform-types",
+          "--disable-warning=ExperimentalWarning",
+        ],
+      });
+    });
+
+    afterAll(async () => {
+      await releaseModelHost({ all: true });
+      setModelHostEntry(undefined);
+      if (savedRuntimeDir === undefined) delete process.env["INFERENCE_RUNTIME_DIR"];
+      else process.env["INFERENCE_RUNTIME_DIR"] = savedRuntimeDir;
+    }, 60_000);
+
+    it("loads once, and answers a second client from the loaded model", async () => {
+      const call = async (): Promise<number> => {
+        const started = performance.now();
+        const provider = new LlamaCppProvider(hostModel, { host: "spawn" });
+        const consensus = await judge({
+          provider,
+          system: SYSTEM,
+          user: "# Assertion\nThe text mentions a cat.\n\n# Text\nThe cat sat on the mat.",
+          runs: 1,
+        });
+        expect(consensus.runs[0]?.error).toBeUndefined();
+        expect(consensus.verdict).toBe("pass");
+        return performance.now() - started;
+      };
+      const first = await call();
+      const second = await call();
+      console.log(
+        `model host, ${hostModel}: first call ${Math.round(first)} ms ` +
+          `(start + load), second client ${Math.round(second)} ms`,
+      );
+      // No timing assertion: a CUDA crash mid-run (ADR 01012) makes the host
+      // reload on Vulkan, and the second call then pays for a load too.
+      const status = await modelHostStatus();
+      expect(status?.models.map((m) => m.model)).toEqual([hostModel]);
     }, TIMEOUT);
   });
 

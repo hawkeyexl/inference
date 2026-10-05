@@ -114,7 +114,19 @@ export type {
   LlamaPromptResult,
   LlamaRuntime,
   LlamaSession,
+  ModelHostMode,
 } from "./providers/llama-cpp.js";
+export {
+  ModelHostBusyError,
+  leaseModelHost,
+  modelHostStatus,
+  releaseModelHost,
+} from "./providers/model-host.js";
+export type {
+  LeaseModelHostOptions,
+  ModelHostStatus,
+  ReleaseModelHostResult,
+} from "./providers/model-host.js";
 export { ensureModel, fits, modelState } from "./providers/llama-lifecycle.js";
 export type {
   EnsureModelResult,
