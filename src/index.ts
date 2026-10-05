@@ -110,6 +110,13 @@ export type {
   LlamaRuntime,
   LlamaSession,
 } from "./providers/llama-cpp.js";
+export { ensureModel, fits, modelState } from "./providers/llama-lifecycle.js";
+export type {
+  EnsureModelResult,
+  FitsResult,
+  LlamaModelLifecycleOptions,
+  LlamaModelState,
+} from "./providers/llama-lifecycle.js";
 export { clearLlamaModels } from "./providers/llama-clean.js";
 export type {
   ClearLlamaModelsOptions,

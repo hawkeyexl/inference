@@ -114,6 +114,60 @@ every part of a split model. An unknown name is rejected rather than silently ma
 [local-model workers](#the-worker-process-and-the-backend). Weights load once per process and are
 shared across providers naming the same model.
 
+## Preparing a model
+
+Get weights onto disk, and ask where they stand, without loading them into memory.
+
+```ts
+function ensureModel(model: string, options?: LlamaModelLifecycleOptions): Promise<EnsureModelResult>;
+function modelState(model: string, options?: LlamaModelLifecycleOptions): Promise<LlamaModelState>;
+function fits(model: string, options?: LlamaModelLifecycleOptions): Promise<FitsResult>;
+
+interface LlamaModelLifecycleOptions {
+  modelsDirectory?: string;  // defaults to defaultLlamaModelsDirectory()
+  gpu?: LlamaGpu;            // the backend the memory probe runs on
+  runtime?: LlamaRuntime;    // test seam; ensureModel then skips the runtime install
+  install?: RuntimeInstallOptions;  // how an absent runtime is installed
+}
+
+interface EnsureModelResult {
+  state: "downloaded" | "ready";  // "downloaded": this call fetched it
+  bytes: number;                  // on disk, summed over a split model's parts
+}
+
+type LlamaModelState = "ready" | "downloading" | "missing";
+
+interface FitsResult {
+  fits: boolean;
+  needBytes: number;  // the model's size times 3.5
+  freeBytes: number;  // the memory the provider would have for weights
+}
+```
+
+All three take what the provider takes: a catalog alias, a tier keyword or `auto`, an `hf:` URI, or
+a path to a `.gguf` file. The options are the `modelsDirectory`, `gpu` and `runtime` of
+`LlamaCppProviderOptions`, so one object serves both.
+
+**`ensureModel`** downloads the weights and the `node-llama-cpp` runtime, and loads neither. The
+runtime comes through [the same install path](#getting-the-runtime) as the provider's and obeys
+`INFERENCE_NO_AUTO_INSTALL`. It is checked before the download, so a refused install fails before
+any weights move. A model already on disk returns `"ready"` without touching the network.
+
+Callers are serialised by a lock file, `.download-<blob>.lock`, in the models directory. A second
+caller waits, and returns `"ready"` when the file appears. A lock whose process has died is
+reclaimed at once. The wait is capped at two hours, and a lock older than six hours is treated as
+abandoned.
+
+**`modelState`** answers without waiting, loading or downloading. `"downloading"` means a live
+process holds the download lock, or a `.ipull` partial for the model was written in the last two
+minutes. A dead process's lock and a partial gone quiet are `"missing"`. A `.gguf` path that
+exists is always `"ready"`. `auto` reads the runtime's memory budget to choose a tier, which can
+start the [local-model worker](#the-worker-process-and-the-backend).
+
+**`fits`** compares the model's size times the headroom `tierForBudget` uses, 3.5, with the memory
+the provider would have for weights: the larger of free VRAM and half of RAM. A catalog model is
+sized from the catalog. Any other model is sized from its file, so it must already be downloaded.
+
 ## The runtime seam
 
 ```ts
@@ -317,6 +371,7 @@ single install; concurrent processes serialise on a lock file in the prefix.
 
 ## Source of truth
 
-`src/providers/llama-models.ts`, `llama-cpp.ts`, `llama-clean.ts`, and `llama-install.ts`. Catalog
+`src/providers/llama-models.ts`, `llama-cpp.ts`, `llama-clean.ts`, `llama-install.ts`, and
+`llama-lifecycle.ts`. Catalog
 invariants, tier selection, every clearing rule, and the install's ordering and concurrency
 guarantees are pinned in `test/unit/llama-*.test.ts`.

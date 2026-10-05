@@ -148,6 +148,30 @@ one `node_modules`.
 **Fix:** wait for the other run. If nothing else is running, the lock was orphaned by a killed
 process — remove the named `.install.lock` and retry.
 
+### `Timed out waiting for another process to download <FILE> into <DIR>`
+
+[`ensureModel`](/inference/reference/local-models/#preparing-a-model) waited two hours for another
+process's download of the same model. Concurrent downloads serialise on a lock in the models
+directory.
+
+**Fix:** wait for the other run. If nothing else is running, remove the named
+`.download-<FILE>.lock` and retry. A lock whose process has died is reclaimed without your help.
+
+### `Cannot prepare a llama-cpp model: <REASON>. Nothing was downloaded.`
+
+`ensureModel` needs the `node-llama-cpp` runtime and cannot get it. `<REASON>` is one of the lines
+from the [detection table](#no-inference-provider-is-available-tried): installing is refused by
+`INFERENCE_NO_AUTO_INSTALL`, or the installed copy fails to load.
+
+**Fix:** unset `INFERENCE_NO_AUTO_INSTALL`, or fix the installed copy.
+
+### `Cannot size llama-cpp model "<M>": it is not in the catalog and its file is not downloaded to <DIR>.`
+
+[`fits`](/inference/reference/local-models/#preparing-a-model) sizes a model that is not in the
+catalog from its file, and the file is not there.
+
+**Fix:** `await ensureModel(model)` first, or name a catalog model.
+
 ### `llama-cpp model "<M>" is a selector and cannot be resolved synchronously — …`
 
 A selector (`auto`, `fast`, `balanced`, `quality`) reached a synchronous factory. Resolving it reads

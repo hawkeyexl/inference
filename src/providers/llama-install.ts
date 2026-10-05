@@ -17,6 +17,7 @@
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -331,19 +332,38 @@ function warnInstalling(directory: string): void {
   );
 }
 
+/** What `withDirLock` needs to know about the work it guards. */
+export interface DirLockOptions {
+  /** The lock file's name, inside the directory. */
+  name: string;
+  /** Finishes a wait early: whoever held the lock has already done the work. */
+  isDone: () => boolean;
+  /** For the timeout message, after "to": `install node-llama-cpp`. */
+  what: string;
+  /** How long to wait for another holder before giving up. */
+  waitMs: number;
+  /** A lock older than this belonged to a process that died holding it. */
+  staleMs: number;
+}
+
 /**
- * Cross-process guard around one prefix.
+ * Cross-process guard around one directory's worth of work: the runtime
+ * prefix's install, or one model's download.
  *
  * The in-process memo covers a worker pool inside one run; this covers two runs
  * started at once, where two npm processes writing one `node_modules` is how a
- * prefix ends up half-written.
+ * prefix ends up half-written. The lock file holds its owner's pid.
+ *
+ * When the lock is held and `isDone()` turns true, the wait ends without
+ * running `fn`: the other holder finished the job.
  */
-async function withLock(
+export async function withDirLock(
   directory: string,
   fn: () => Promise<void>,
+  options: DirLockOptions,
 ): Promise<void> {
-  const lock = join(directory, LOCK);
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const lock = join(directory, options.name);
+  const deadline = Date.now() + options.waitMs;
 
   for (;;) {
     try {
@@ -351,16 +371,18 @@ async function withLock(
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      if (ageOf(lock) > LOCK_STALE_MS) {
+      if (isStaleLock(lock, options.staleMs)) {
         // Whoever held this died. Reclaiming a stale lock is safer than
         // blocking forever on a process that will never return.
+        // ponytail: two waiters can both reclaim, and one then removes the
+        // other's fresh lock. A rename-based reclaim if that ever shows up.
         rmSync(lock, { force: true });
         continue;
       }
-      if (existsSync(join(directory, SHIM))) return;
+      if (options.isDone()) return;
       if (Date.now() > deadline) {
         throw new InferenceError(
-          `Timed out waiting for another process to install node-llama-cpp into ` +
+          `Timed out waiting for another process to ${options.what} into ` +
             `${directory}. If nothing else is running, remove ${lock} and retry.`,
         );
       }
@@ -373,6 +395,47 @@ async function withLock(
   } finally {
     rmSync(lock, { force: true });
   }
+}
+
+/** Is the lock held by a live process, and not yet stale? */
+export function lockIsHeld(
+  directory: string,
+  name: string,
+  staleMs: number,
+): boolean {
+  const lock = join(directory, name);
+  return existsSync(lock) && !isStaleLock(lock, staleMs);
+}
+
+/** Past `staleMs`, or written by a process that is no longer running. */
+function isStaleLock(lock: string, staleMs: number): boolean {
+  if (ageOf(lock) > staleMs) return true;
+  let pid: number;
+  try {
+    pid = Number.parseInt(readFileSync(lock, "utf8"), 10);
+  } catch {
+    return false;
+  }
+  // An empty lock is one whose owner has not written its pid yet.
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    // EPERM: the process exists but belongs to someone else, so it is alive.
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/** The runtime prefix's install, serialised across processes. */
+function withLock(directory: string, fn: () => Promise<void>): Promise<void> {
+  return withDirLock(directory, fn, {
+    name: LOCK,
+    isDone: () => existsSync(join(directory, SHIM)),
+    what: "install node-llama-cpp",
+    waitMs: LOCK_WAIT_MS,
+    staleMs: LOCK_STALE_MS,
+  });
 }
 
 /** Infinity for a lock that vanished mid-check, so the caller retries. */

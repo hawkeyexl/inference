@@ -128,7 +128,7 @@ carry an executed code sample.
 | `reference/judge.mdx` | P1, P4 | ★ | `judge`, `runEnsemble`, `EnsembleOptions`, `computeConsensus`, `zoneFor`, `ConsensusResult`, `JudgeRun`, `JudgeVerdict`, `VERDICT_SCHEMA`, `DEFAULT_ZONES`, `resetTemperatureWarning`. |
 | `reference/cache.mdx` | P2, U1 | ★ | `JsonCache` constructor arity, `buildCacheKey`, `sha256`, and the on-disk file format. |
 | `reference/cost.mdx` | P3, M2 | ★ | `PRICE_TABLE` contents, `pricingFor` resolution order, `costOfUsage`, `costOfRuns`, `Pricing`. |
-| `reference/local-models.mdx` | O1, O2, O3 | ★ | The catalog, tiers and selectors, `LlamaCppProviderOptions`, `LlamaRuntime`, `clearLlamaModels`, `disposeLlamaModels`. |
+| `reference/local-models.mdx` | O1, O2, O3 | ★ | The catalog, tiers and selectors, `LlamaCppProviderOptions`, `LlamaRuntime`, `clearLlamaModels`, `disposeLlamaModels`, `ensureModel`, `modelState`, `fits`. |
 | `reference/errors.mdx` | X2 | | Every message the library can throw, verbatim, with trigger and fix. Gated against `src/` by `check-error-coverage.mjs`. |
 | `reference/warnings.mdx` | X2 | | The four `console.warn` paths, their once-per scope, and the reset seams. |
 | `reference/exec.mdx` | M3 | | `realExec`, `ExecFn`, `ExecOptions`, `ExecResult`, and the two distinct default timeouts. |
@@ -156,7 +156,7 @@ Reference pages must never contradict the source. Cross-read the paired files be
 | `reference/judge.mdx` | `src/judge/ensemble.ts`, `src/judge/consensus.ts`, `src/judge/zones.ts`, `src/judge/types.ts`, `src/judge/verdict-schema.json` |
 | `reference/cache.mdx` | `src/cache.ts` |
 | `reference/cost.mdx` | `src/cost.ts` |
-| `reference/local-models.mdx` | `src/providers/llama-models.ts`, `src/providers/llama-cpp.ts`, `src/providers/llama-host.ts`, `src/providers/llama-worker.ts`, `src/providers/llama-clean.ts` |
+| `reference/local-models.mdx` | `src/providers/llama-models.ts`, `src/providers/llama-cpp.ts`, `src/providers/llama-host.ts`, `src/providers/llama-worker.ts`, `src/providers/llama-clean.ts`, `src/providers/llama-lifecycle.ts` |
 | `reference/exec.mdx` | `src/exec.ts`, `src/providers/types.ts` |
 | `reference/errors-and-types.mdx` | `src/types.ts`, `src/index.ts` |
 

@@ -109,6 +109,21 @@ up with half a model on disk.
   parts. `isModelDownloaded(model, directory)` answers the question without a download.
 </Aside>
 
+## Download ahead of time
+
+A first call otherwise pays for the download. To warm a CI image or a fresh machine, fetch the
+weights and the runtime without loading them:
+
+```ts
+const { state, bytes } = await ensureModel("balanced");   // "downloaded" or "ready"
+await modelState("balanced");                              // "ready" | "downloading" | "missing"
+const { fits: roomy, needBytes, freeBytes } = await fits("balanced");
+```
+
+`ensureModel` is safe to run from several processes at once: one downloads and the rest return
+`"ready"`. Use `modelState` to look without waiting. Signatures are in the
+[local models reference](/inference/reference/local-models/#preparing-a-model).
+
 ## Free memory without deleting
 
 ```ts
