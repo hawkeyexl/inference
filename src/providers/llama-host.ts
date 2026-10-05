@@ -24,15 +24,18 @@ import {
   isModuleNotFound,
   nodeLlamaCppShimUrl,
 } from "./llama-install.js";
-import { WORKER_ENV_FLAG, openBackend } from "./llama-worker.js";
+import { WORKER_ENV_FLAG, decideOn, openBackend } from "./llama-worker.js";
 import type {
   WorkerBackend,
   WorkerBackendOptions,
   WorkerGpu,
   WorkerMessage,
+  WorkerModel,
   WorkerRequest,
 } from "./llama-worker.js";
 import type {
+  LlamaDecideOptions,
+  LlamaDecideResult,
   LlamaLoadedModel,
   LlamaPromptOptions,
   LlamaPromptResult,
@@ -627,6 +630,7 @@ class WorkerModelProxy {
     return {
       contextSize: session.contextSize,
       prompt: (text, options) => session.prompt(text, options),
+      decide: (options) => session.decide(options),
       dispose: () => session.dispose(),
     };
   }
@@ -692,6 +696,17 @@ class WorkerSessionProxy {
     );
   }
 
+  /** A retried decision starts over on a fresh session, like a retried prompt. */
+  decide(options: LlamaDecideOptions): Promise<LlamaDecideResult> {
+    return this.slot.run(async (host) =>
+      host.request<LlamaDecideResult>({
+        op: "decide",
+        sessionId: await this.on(host),
+        options,
+      }),
+    );
+  }
+
   async dispose(): Promise<void> {
     await Promise.all(
       [...this.ids].map(async ([host, id]) => {
@@ -731,8 +746,26 @@ function inProcessRuntime(gpu: LlamaGpu): LlamaRuntime {
   return {
     resolveModelFile: (uri, directory) =>
       backendSource().then((source) => source.resolveModelFile(uri, directory)),
-    loadModel: (path) => backend().then((b) => b.loadModel(path)),
+    loadModel: (path) => backend().then(async (b) => deciding(await b.loadModel(path))),
     getMemoryBudgetBytes: () => backend().then((b) => b.memoryBudget()),
+  };
+}
+
+/** An in-process model whose sessions decide here, as the worker's would there. */
+function deciding(model: WorkerModel): LlamaLoadedModel {
+  return {
+    trainContextSize: model.trainContextSize,
+    countTokens: (text) => model.countTokens(text),
+    dispose: () => model.dispose(),
+    async createSession(systemPrompt, contextSize) {
+      const session = await model.createSession(systemPrompt, contextSize);
+      return {
+        contextSize: session.contextSize,
+        prompt: (text, options) => session.prompt(text, options),
+        decide: (options) => decideOn(session, options),
+        dispose: () => session.dispose(),
+      };
+    },
   };
 }
 

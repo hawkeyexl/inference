@@ -24,7 +24,12 @@ import {
   disposeLlamaModels,
   makeProviderAsync,
 } from "../../src/index.js";
-import type { CompleteJSONRequest } from "../../src/index.js";
+import type {
+  CompleteJSONRequest,
+  DecideRequest,
+  LlamaDecideResult,
+  LlamaRuntime,
+} from "../../src/index.js";
 import {
   llamaWorkerPids,
   resetLlamaWorkers,
@@ -66,7 +71,7 @@ function configure(config: Record<string, unknown>): void {
 }
 
 /** The fixture's log, as `[event, backend, pid]` triples. */
-function events(kind: "init" | "prompt"): { backend: string; pid: number }[] {
+function events(kind: "init" | "prompt" | "decide"): { backend: string; pid: number }[] {
   let text = "";
   try {
     text = readFileSync(log, "utf8");
@@ -305,6 +310,153 @@ describe("an explicitly chosen backend", () => {
     expect(() => provider({ gpu: gpu as never })).toThrow(
       /llamaCpp\.gpu must be "auto", "cuda", "vulkan", "metal" or false/,
     );
+  });
+});
+
+const STATE = "The agent ran `git commit --no-verify`, then wrote a summary.";
+const DECIDE: DecideRequest = {
+  state: STATE,
+  questions: {
+    hooks: {
+      type: "choice",
+      instructions: "Did the agent skip a git hook?",
+      criteria: { yes: "It skipped one.", no: "It ran every hook." },
+    },
+    tests: {
+      type: "choice",
+      instructions: "Did the agent run the tests?",
+      criteria: { yes: "It ran them.", no: "It did not." },
+    },
+    tone: {
+      type: "choice",
+      instructions: "How did the agent word its summary?",
+      criteria: { plain: "Plainly.", hedged: "With hedges.", absent: "There was none." },
+    },
+  },
+};
+
+/**
+ * The fixture's scripted next-token probabilities, keyed by text only that
+ * question's prompt holds. Letters take only part of the mass, as on a real
+ * model, and the fixture refuses a context holding two questions at once.
+ */
+function configureDecisions(sequence: string, extra: Record<string, unknown> = {}): void {
+  configure({
+    decide: {
+      sequence,
+      answers: {
+        "skip a git hook": { A: 0.375, B: 0.125 },
+        "run the tests": { B: 0.9 },
+        "word its summary": { A: 0.1, C: 0.4 },
+      },
+    },
+    ...extra,
+  });
+}
+
+/** The real runtime, recording what each session's decide() reported. */
+function recordingDecisions(): { runtime: LlamaRuntime; results: LlamaDecideResult[] } {
+  const results: LlamaDecideResult[] = [];
+  const real = defaultLlamaRuntime();
+  return {
+    results,
+    runtime: {
+      ...real,
+      async loadModel(path) {
+        const model = await real.loadModel(path);
+        return {
+          ...model,
+          async createSession(systemPrompt, contextSize) {
+            const session = await model.createSession(systemPrompt, contextSize);
+            return {
+              ...session,
+              async decide(options) {
+                const result = await session.decide!(options);
+                results.push(result);
+                return result;
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+}
+
+describe("decisions in the worker", () => {
+  async function decide(request: DecideRequest = DECIDE) {
+    // A fresh worker, so it reads the fixture's configuration as it is now, and
+    // no loaded model left by an earlier call bypasses this recording runtime.
+    await disposeLlamaModels();
+    const { runtime, results } = recordingDecisions();
+    const response = await provider({ runtime }).decide(request);
+    return { response, result: results[0]! };
+  }
+
+  it("answers each question from the next-token probabilities of its letters", async () => {
+    configureDecisions("attention");
+    const { response } = await decide();
+    expect(response.answers["hooks"]).toEqual({
+      choice: "yes",
+      probabilities: { yes: 0.75, no: 0.25 },
+      confidence: 0.75,
+    });
+    expect(response.answers["tests"]).toEqual({
+      choice: "no",
+      probabilities: { yes: 0, no: 1 },
+      confidence: 1,
+    });
+    expect(response.answers["tone"]!.choice).toBe("absent");
+    expect(response.answers["tone"]!.confidence).toBeCloseTo(0.8);
+    expect(response.usage?.inputTokens).toBeGreaterThan(0);
+    expect(response.usage?.outputTokens).toBe(0);
+    expect(events("decide").map((e) => e.backend)).toEqual(["cuda", "cuda", "cuda"]);
+  });
+
+  it("evaluates the shared state once and erases each question after it", async () => {
+    configureDecisions("attention");
+    const { result } = await decide();
+    expect(result.reuse).toBe("erase");
+  });
+
+  it("restores a hybrid model's sequence from a checkpoint instead", async () => {
+    configureDecisions("attention");
+    const erased = await decide();
+    configureDecisions("hybrid");
+    const restored = await decide();
+    expect(restored.result.reuse).toBe("checkpoint");
+    expect(restored.response).toEqual(erased.response);
+  });
+
+  it("re-evaluates the state per question when the sequence cannot be restored", async () => {
+    configureDecisions("attention");
+    const erased = await decide();
+    configureDecisions("hybrid-without-checkpoints");
+    const again = await decide();
+    expect(again.result.reuse).toBe("reevaluate");
+    // The same answers, at the price of evaluating the state once per question.
+    expect(again.response.answers).toEqual(erased.response.answers);
+    expect(again.response.usage!.inputTokens).toBeGreaterThan(
+      erased.response.usage!.inputTokens + 2 * STATE.length,
+    );
+  });
+
+  it("reports no reuse for a single question", async () => {
+    configureDecisions("hybrid");
+    const { result, response } = await decide({
+      state: DECIDE.state,
+      questions: { hooks: DECIDE.questions["hooks"]! },
+    });
+    expect(result.reuse).toBeUndefined();
+    expect(response.answers["hooks"]!.choice).toBe("yes");
+  });
+
+  it("falls back from a backend that crashes mid-decision", async () => {
+    configureDecisions("hybrid", { abort: { cuda: "decide" } });
+    const { response } = await decide();
+    expect(response.answers["tests"]!.choice).toBe("no");
+    expect(events("decide").map((e) => e.backend)).toEqual(["cuda", "vulkan", "vulkan", "vulkan"]);
+    expect(warnings()).toHaveLength(1);
   });
 });
 

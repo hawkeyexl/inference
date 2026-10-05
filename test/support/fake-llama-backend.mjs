@@ -11,10 +11,15 @@
  * inherits at fork time:
  *
  *   available      GPU backends this "machine" offers, best first (default cuda, vulkan)
- *   abort          { cuda | vulkan | cpu: "init" | "load" | "prompt" } — where that backend aborts
+ *   abort          { cuda | vulkan | cpu: "init" | "load" | "prompt" | "decide" } — where that backend aborts
  *   throwOnPrompt  an ordinary error message every prompt throws
  *   delayMs        how long a prompt takes, so concurrent calls overlap
- *   log            a file each init and prompt is appended to, for the test to read
+ *   log            a file each init, prompt and decision probe is appended to, for the test to read
+ *   decide         { sequence, answers } — how a session's context sequence behaves for decide():
+ *                    sequence  "attention" (erasing tokens keeps the rest), "hybrid" (only a
+ *                              checkpoint restores a prefix), or "hybrid-without-checkpoints"
+ *                              (nothing does, so a prefix is evaluated again)
+ *                    answers   { "<text only one question holds>": { "<letter>": probability } }
  */
 import { appendFileSync, writeSync } from "node:fs";
 
@@ -61,9 +66,10 @@ export async function createWorkerBackend(options, hooks) {
       return {
         trainContextSize: 131_072,
         countTokens: (text) => Math.ceil(text.length / 4),
-        async createSession(_systemPrompt, contextSize) {
+        async createSession(systemPrompt, contextSize) {
           return {
             contextSize,
+            sequence: fakeSequence(systemPrompt, gpu, abortAt),
             async prompt() {
               record(`prompt ${label(gpu)} ${process.pid}`);
               if (config.delayMs) {
@@ -82,6 +88,65 @@ export async function createWorkerBackend(options, hooks) {
         },
         async dispose() {},
       };
+    },
+  };
+}
+
+/**
+ * A context sequence whose tokens are the characters of its text. The decision
+ * logic in the worker drives it exactly as it drives node-llama-cpp's: render,
+ * evaluate, checkpoint, probe, erase. Only the probabilities are scripted.
+ */
+function fakeSequence(systemPrompt, gpu, abortAt) {
+  const kind = config.decide?.sequence ?? "attention";
+  const answers = config.decide?.answers ?? {};
+  const encode = (text) => [...text].map((c) => c.codePointAt(0));
+  let tokens = [];
+  let input = 0;
+  let checkpoint;
+  const evaluate = (more) => {
+    tokens.push(...more);
+    input += more.length;
+  };
+  return {
+    get needsCheckpoints() {
+      return kind !== "attention";
+    },
+    get nextTokenIndex() {
+      return tokens.length;
+    },
+    inputTokens: () => input,
+    render: (user, answerPrefix) =>
+      encode(`<system>${systemPrompt}</system><user>${user}</user><assistant>${answerPrefix}`),
+    labelTokens: (label) => encode(label),
+    async evaluate(more) {
+      evaluate(more);
+    },
+    async takeCheckpoint() {
+      if (kind === "hybrid") checkpoint = tokens.length;
+    },
+    async erase(start, end) {
+      const kept = [...tokens.slice(0, start), ...tokens.slice(end)];
+      tokens = [];
+      // A checkpoint restores the state as it was at its own length, no other.
+      if (kind === "attention" || checkpoint === start) {
+        tokens = kept;
+        return;
+      }
+      // No state survives the erase: evaluate what is left from scratch.
+      evaluate(kept);
+    },
+    async probe(more) {
+      record(`decide ${label(gpu)} ${process.pid}`);
+      if (abortAt === "decide") crash(gpu);
+      evaluate(more);
+      const text = String.fromCodePoint(...tokens);
+      const held = Object.keys(answers).filter((key) => text.includes(key));
+      if (held.length > 1) {
+        throw new Error(`The fake sequence holds ${held.length} questions at once: ${held.join(", ")}.`);
+      }
+      const weights = held.length === 1 ? answers[held[0]] : {};
+      return new Map(Object.entries(weights).map(([letter, p]) => [letter.codePointAt(0), p]));
     },
   };
 }

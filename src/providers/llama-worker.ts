@@ -13,7 +13,14 @@
  * Types are erased, so `import type` from siblings is fine.
  */
 import { totalmem } from "node:os";
-import type { LlamaPromptOptions, LlamaPromptResult } from "./llama-cpp.js";
+import type { ChatWrapper, Token } from "node-llama-cpp";
+import type {
+  LlamaDecideOptions,
+  LlamaDecideResult,
+  LlamaDecideReuse,
+  LlamaPromptOptions,
+  LlamaPromptResult,
+} from "./llama-cpp.js";
 
 /** A llama.cpp backend, as node-llama-cpp names it; `false` is the CPU. */
 export type WorkerGpu = "metal" | "cuda" | "vulkan" | false;
@@ -44,7 +51,101 @@ export interface WorkerBackendHooks {
 export interface WorkerSession {
   readonly contextSize?: number;
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  /** The session's context sequence, which `decideOn` drives. */
+  readonly sequence?: DecideSequence;
   dispose(): Promise<void>;
+}
+
+/**
+ * The parts of a context sequence a decision uses: node-llama-cpp's, or the
+ * test suite's stand-in. Tokens are plain numbers here.
+ */
+export interface DecideSequence {
+  /** The whole chat for one prompt, ending inside the opened answer, as tokens. */
+  render(user: string, answerPrefix: string): number[];
+  /** Every single token that spells `label` as the next token, with or without a leading space. */
+  labelTokens(label: string): number[];
+  /** Hybrid and recurrent models cannot erase; they restore a checkpoint instead. */
+  readonly needsCheckpoints: boolean;
+  readonly nextTokenIndex: number;
+  /** Input tokens evaluated so far, including any re-evaluation an erase caused. */
+  inputTokens(): number;
+  evaluate(tokens: number[]): Promise<void>;
+  /** Snapshot the state here, when `needsCheckpoints`; otherwise nothing. */
+  takeCheckpoint(): Promise<void>;
+  /** Evaluate `tokens` and return the next-token distribution after the last one. */
+  probe(tokens: number[]): Promise<Map<number, number>>;
+  /** Remove tokens `[start, end)`, restoring or re-evaluating what remains as needed. */
+  erase(start: number, end: number): Promise<void>;
+}
+
+/**
+ * Answer a decision on one session. Every prompt is rendered whole, and the
+ * tokens all prompts share are evaluated once. Each question then evaluates
+ * only its own tail, reads the next-token probability of its labels, and is
+ * erased back to the shared start for the next. ADR 01016.
+ *
+ * Whether the erase kept the shared start is read from the token meter, not
+ * assumed: a model that cannot erase and has no usable checkpoint makes
+ * node-llama-cpp evaluate the start again, and that shows as input tokens.
+ */
+export async function decideOn(
+  session: WorkerSession,
+  options: LlamaDecideOptions,
+): Promise<LlamaDecideResult> {
+  const sequence = session.sequence;
+  if (!sequence) {
+    throw new Error("This local-model session has no context sequence to decide on.");
+  }
+  const rendered = options.prompts.map((p) => sequence.render(p, options.answerPrefix));
+  const shared = sharedPrefixLength(rendered);
+  const start = sequence.inputTokens();
+  if (shared > 0) await sequence.evaluate(rendered[0]!.slice(0, shared));
+  if (sequence.needsCheckpoints) await sequence.takeCheckpoint();
+
+  let reuse: LlamaDecideReuse | undefined;
+  const weights: Record<string, number>[] = [];
+  for (const [i, tokens] of rendered.entries()) {
+    if (i > 0) {
+      const before = sequence.inputTokens();
+      await sequence.erase(shared, sequence.nextTokenIndex);
+      if (sequence.inputTokens() > before) reuse = "reevaluate";
+      else reuse ??= sequence.needsCheckpoints ? "checkpoint" : "erase";
+    }
+    const next = await sequence.probe(tokens.slice(shared));
+    const labels = options.labels[i] ?? [];
+    weights.push(
+      Object.fromEntries(
+        labels.map((label) => {
+          const ids = new Set(sequence.labelTokens(label));
+          if (ids.size === 0) {
+            throw new Error(
+              `The model has no single token for the answer label "${label}", so it cannot decide.`,
+            );
+          }
+          return [label, [...ids].reduce((sum, id) => sum + (next.get(id) ?? 0), 0)];
+        }),
+      ),
+    );
+  }
+  return {
+    weights,
+    usage: { inputTokens: sequence.inputTokens() - start, outputTokens: 0 },
+    ...(reuse ? { reuse } : {}),
+  };
+}
+
+/** Tokens every prompt starts with, leaving each at least one of its own. */
+function sharedPrefixLength(rendered: number[][]): number {
+  const [first, ...rest] = rendered;
+  if (!first) return 0;
+  let length = Math.min(...rendered.map((tokens) => tokens.length)) - 1;
+  for (const tokens of rest) {
+    let i = 0;
+    while (i < length && tokens[i] === first[i]) i++;
+    length = i;
+  }
+  return Math.max(0, length);
 }
 
 export interface WorkerModel {
@@ -95,6 +196,31 @@ async function nodeLlamaCppBackend(
   hooks: WorkerBackendHooks,
 ): Promise<WorkerBackend> {
   const { getLlama, getLlamaGpuTypes, LlamaChatSession, TokenMeter } = mod;
+  const { Gemma4ChatWrapper, QwenChatWrapper } = mod;
+
+  /**
+   * The chat template with thinking off. A decision reads the token right
+   * after the answer prefix, so a model that opened a thought block there
+   * would put its mass on the block, not on a letter. Qwen3 and 3.5 get the
+   * empty `<think></think>` their template uses when thinking is disabled;
+   * Gemma 4 gets its non-reasoning prompt. Other templates are used as is.
+   */
+  const withoutThinking = (wrapper: ChatWrapper): ChatWrapper => {
+    if (wrapper instanceof QwenChatWrapper) {
+      return new QwenChatWrapper({
+        variation: wrapper.variation,
+        keepOnlyLastThought: wrapper.keepOnlyLastThought,
+        thoughts: "discourage",
+      });
+    }
+    if (wrapper instanceof Gemma4ChatWrapper && wrapper.reasoning) {
+      return new Gemma4ChatWrapper({
+        reasoning: false,
+        keepOnlyLastThought: wrapper.keepOnlyLastThought,
+      });
+    }
+    return wrapper;
+  };
 
   if (options.gpu === "auto" || typeof options.gpu === "object") {
     // getLlama picks the best supported backend not excluded; name that one
@@ -149,8 +275,50 @@ async function nodeLlamaCppBackend(
             contextSequence: sequence,
             systemPrompt,
           });
+          const chat = withoutThinking(session.chatWrapper);
           return {
             contextSize: context.contextSize,
+            sequence: {
+              get needsCheckpoints() {
+                return sequence.needsCheckpoints;
+              },
+              get nextTokenIndex() {
+                return sequence.nextTokenIndex;
+              },
+              inputTokens: () => sequence.tokenMeter.usedInputTokens,
+              render(user, answerPrefix) {
+                const { contextText } = chat.generateContextState({
+                  chatHistory: [
+                    { type: "system", text: systemPrompt },
+                    { type: "user", text: user },
+                    { type: "model", response: [answerPrefix] },
+                  ],
+                });
+                return contextText.tokenize(model.tokenizer);
+              },
+              labelTokens: (label) =>
+                [
+                  model.tokenize(label, false, "trimLeadingSpace"),
+                  model.tokenize(` ${label}`, false),
+                ].flatMap((tokens) => (tokens.length === 1 ? tokens : [])),
+              evaluate: (tokens) =>
+                sequence.evaluateWithoutGeneratingNewTokens(tokens as Token[]),
+              takeCheckpoint: () => sequence.takeCheckpoint(),
+              erase: (start, end) => sequence.eraseContextTokenRanges([{ start, end }]),
+              async probe(tokens) {
+                const last = tokens.length - 1;
+                const output = await sequence.controlledEvaluate(
+                  (tokens as Token[]).map((token, i) =>
+                    i === last
+                      ? [token, { generateNext: { probabilities: true } }]
+                      : token,
+                  ),
+                );
+                // Temperature 0 samples greedily, so this is the softmax over
+                // the whole vocabulary, untruncated by top-k or top-p.
+                return output[last]?.next.probabilities ?? new Map<number, number>();
+              },
+            },
             async prompt(text, promptOptions) {
               const grammar = await llama.createGrammarForJsonSchema(
                 promptOptions.schema as Parameters<
@@ -198,6 +366,7 @@ export type WorkerRequest = { id: number } & (
   | { op: "countTokens"; modelId: number; text: string }
   | { op: "createSession"; modelId: number; systemPrompt: string; contextSize?: number }
   | { op: "prompt"; sessionId: number; text: string; options: LlamaPromptOptions }
+  | { op: "decide"; sessionId: number; options: LlamaDecideOptions }
   | { op: "disposeSession"; sessionId: number }
   | { op: "disposeModel"; modelId: number }
   | { op: "shutdown" }
@@ -272,6 +441,8 @@ function serve(): void {
       }
       case "prompt":
         return session(request.sessionId).prompt(request.text, request.options);
+      case "decide":
+        return decideOn(session(request.sessionId), request.options);
       case "disposeSession": {
         const found = sessions.get(request.sessionId);
         sessions.delete(request.sessionId);
