@@ -11,7 +11,7 @@ decision-makers: [hawkeyexl]
 ADR 01013 added decisions as an optional provider capability and copied its request shape from
 TypeSafe's Jev "System One" API. No provider yet answers them with a real model's probabilities
 except the local one in progress. Jev is the hosted option: a purpose-built model that returns a
-probability for each option of a question, at $0.042 per million input tokens and free output.
+probability for each option of a question.
 
 How should the library reach it, given that it is a decision-only service that needs a paid key?
 
@@ -22,7 +22,6 @@ How should the library reach it, given that it is a decision-only service that n
 - Jev generates no text, so it must not look like a provider that does.
 - Detection ends at a free local model on purpose. A paid hosted provider must never be picked
   without being named.
-- Unknown price is `undefined`, and a moving alias has no known price.
 - Tests must not call the network.
 
 ## Considered Options
@@ -34,7 +33,7 @@ How should the library reach it, given that it is a decision-only service that n
 ## Decision Outcome
 
 Chosen option: "A `jev` provider that is a `DecisionProvider` only", because it uses the factory,
-the spec, the key handling and the cost table the other providers use, and it claims nothing it
+the spec and the key handling the other providers use, and it claims nothing it
 cannot do.
 
 ### The API as verified
@@ -95,14 +94,6 @@ answer, its type or its probabilities is "a response this library cannot read". 
 retry. A decision has no schema to revalidate, and a consumer knows better than a library whether a
 rate-limited call is worth waiting for.
 
-### Price
-
-`PRICE_TABLE` gains `jev-1.13.0` at $0.042 input and $0 output, from the models page. It does not
-gain `jev-latest`. That name is an alias TypeSafe re-points, so a price recorded for it would
-quietly be wrong after the next release, and a budget gate would trust it. With no entry the cost of
-a `jev-latest` run is unknown, which is `0` by the repo's rule. A consumer who accepts today's price
-passes `pricing`, or names `jev-1.13.0`.
-
 ### Consequences
 
 - Good, because the hosted and local decision providers take the same request, so a consumer
@@ -120,7 +111,7 @@ passes `pricing`, or names `jev-1.13.0`.
 `test/unit/jev.test.ts` injects `fetch`, the only double, and pins the request mapping, the bearer
 header, the URL, `baseUrl` and timeout handling, the normalization of a response, usage, the 255
 option cap, each HTTP failure, network failure and timeout, and each malformed response. It also
-asserts that detection never lists `jev` and that the price table holds the pinned model only.
+asserts that detection never lists `jev`.
 `scripts/check-docs-exports.mjs` and `scripts/check-error-coverage.mjs` hold the reference pages to
 the new exports and messages.
 
@@ -133,13 +124,13 @@ the new exports and messages.
 
 ### A `jev` provider that is a `DecisionProvider` only (chosen)
 
-- Good, because it reuses the factory, spec and cost conventions.
+- Good, because it reuses the factory and spec conventions.
 - Bad, because the provider names a service the library cannot test against in CI.
 
 ### A separate `decide` client outside the factory
 
 - Good, because it can't be confused with a text provider.
-- Bad, because key handling, the base URL, the timeout and the cost lookup would each be built a
+- Bad, because key handling, the base URL and the timeout would each be built a
   second time, and `canDecide` would no longer cover every decision provider.
 
 ### A `jev` provider that also answers `completeJSON`

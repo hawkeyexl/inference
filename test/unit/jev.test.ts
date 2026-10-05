@@ -12,7 +12,6 @@ import {
   JevProvider,
   canDecide,
   makeProvider,
-  pricingFor,
   resolveProviderIdentity,
 } from "../../src/index.js";
 import { toJevRequest } from "../../src/providers/jev.js";
@@ -302,10 +301,5 @@ describe("the factory", () => {
 
   it("is never picked by auto-detection", () => {
     expect(DETECTION_ORDER).not.toContain("jev");
-  });
-
-  it("has a price for the pinned model, and none for the moving alias", () => {
-    expect(pricingFor("jev-1.13.0")).toEqual({ inputPerMTok: 0.042, outputPerMTok: 0 });
-    expect(pricingFor("jev-latest")).toBeUndefined();
   });
 });

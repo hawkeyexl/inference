@@ -21,9 +21,6 @@ export const PRICE_TABLE: Record<string, Pricing> = {
   "claude-opus-4-8": { inputPerMTok: 15, outputPerMTok: 75 },
   "gpt-4o-mini": { inputPerMTok: 0.15, outputPerMTok: 0.6 },
   "gpt-4o": { inputPerMTok: 2.5, outputPerMTok: 10 },
-  // Pinned only. `jev-latest` is an alias TypeSafe re-points, so it carries no
-  // price here: pass `pricing` once you accept what it costs today.
-  "jev-1.13.0": { inputPerMTok: 0.042, outputPerMTok: 0 },
 };
 
 export function pricingFor(

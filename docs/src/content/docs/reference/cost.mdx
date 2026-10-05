@@ -34,10 +34,8 @@ const PRICE_TABLE: Record<string, Pricing>;
 | `claude-haiku-4-5` | $1.00 | $5.00 |
 | `gpt-4o` | $2.50 | $10.00 |
 | `gpt-4o-mini` | $0.15 | $0.60 |
-| `jev-1.13.0` | $0.042 | free |
 
-Local models are deliberately absent — they have no per-token cost. `jev-latest` is absent too: it
-is an alias TypeSafe re-points, so its price is not known. Price it with the `pricing` override.
+Local models are deliberately absent — they have no per-token cost.
 
 <Aside type="note">
   Read the table at runtime rather than copying these numbers. It is exported precisely so a
