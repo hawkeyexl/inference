@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.3](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.2...v0.5.0-decide-and-host.3) (2026-10-05)
+
+
+### Features
+
+* **llama-cpp:** answer decisions from option-letter probabilities ([dcd9d59](https://github.com/hawkeyexl/inference/commit/dcd9d594aa22d298730ca5ce03ceffe59c654373))
+
 # [0.5.0-decide-and-host.2](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.1...v0.5.0-decide-and-host.2) (2026-10-05)
 
 
