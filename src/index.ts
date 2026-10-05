@@ -24,6 +24,16 @@ export type {
   TokenUsage,
 } from "./providers/types.js";
 
+// Decision capability — optional, detected with canDecide (ADR 01013)
+export { canDecide } from "./providers/decide.js";
+export type {
+  DecideAnswer,
+  DecideQuestion,
+  DecideRequest,
+  DecideResponse,
+  DecisionProvider,
+} from "./providers/decide.js";
+
 // Provider factory
 export {
   makeProvider,
@@ -59,7 +69,12 @@ export {
 export type { OpenAICompatProviderOptions } from "./providers/openai-compat.js";
 export { ClaudeCliProvider } from "./providers/claude-cli.js";
 export { MockProvider, mockVerdict } from "./providers/mock.js";
-export type { MockResponse } from "./providers/mock.js";
+export type {
+  MockDecision,
+  MockDecisions,
+  MockProviderOptions,
+  MockResponse,
+} from "./providers/mock.js";
 
 // Local models (llama.cpp). `node-llama-cpp` is an optional peer dependency —
 // importing these names does not load it; constructing a provider does.

@@ -208,6 +208,48 @@ The dynamic import failed. The original error is appended in parentheses.
 **Fix:** `npm install node-llama-cpp`. It is an optional peer dependency and is never installed for
 you.
 
+### `decide() needs at least one question.`
+
+This and the five messages after it are rejections from `decide()`, not construction errors. See
+[decisions](/inference/reference/providers/#decisions).
+
+A `decide` request whose `questions` object is empty.
+
+**Fix:** ask at least one question.
+
+### `decide() question ids must be non-empty strings.` — or `decide() question "<Q>" has an empty criterion id.`
+
+A key of `questions`, or a key of a question's `criteria`, is `""`. Ids are what the answers are
+keyed by, so an empty one cannot be told apart.
+
+**Fix:** give every question and every option a non-empty id.
+
+### `decide() question "<Q>" needs at least two criteria, got <N>.`
+
+A question offers fewer than two options. A decision between one option is no decision.
+
+**Fix:** add the options the question chooses between to its `criteria`.
+
+### `decide() question "<Q>" has type "<T>"; the only question type is "choice".`
+
+A question's `type` is not `"choice"`. Usually a JavaScript caller with no type checking.
+
+**Fix:** set `type: "choice"`.
+
+### `Decision weight names "<O>", which is not one of the question's criteria (<OPTIONS>).`
+
+A provider, or a `MockProvider` script, gave a probability or a choice for an option the question
+does not offer. With `mockDecisions`, the scripted option id is misspelled or belongs to another
+question.
+
+**Fix:** use one of the listed option ids.
+
+### `Decision weight for "<O>" must be a finite, non-negative number, got <X>.`
+
+A provider, or a `MockProvider` script, gave a weight that is negative, `NaN` or infinite.
+
+**Fix:** script weights of 0 or more. They need not sum to 1, since they are normalized.
+
 ## Model failures — recorded on `run.error`
 
 None of these throw. Each arrives with `result` (or `verdict`) absent.

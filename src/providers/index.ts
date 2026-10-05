@@ -25,7 +25,7 @@ import {
 import { detectProvider, warnPendingDownload } from "./detect.js";
 import type { AnthropicProviderOptions } from "./anthropic.js";
 import type { OpenAICompatProviderOptions } from "./openai-compat.js";
-import type { MockResponse } from "./mock.js";
+import type { MockDecisions, MockResponse } from "./mock.js";
 import type {
   LlamaCppProviderOptions,
   LlamaGpu,
@@ -77,6 +77,10 @@ export interface ProviderSpec {
   llamaRuntime?: LlamaRuntime;
   /** Scripted responses for the mock provider; defaults to a single empty object. */
   mockResponses?: MockResponse[];
+  /** Scripted decisions for the mock provider; unscripted questions are uniform. */
+  mockDecisions?: MockDecisions;
+  /** What the mock provider's `stateLimit()` reports; default 8192. */
+  mockStateLimit?: number;
 }
 
 export const DEFAULT_MODELS: Record<ProviderName, string> = {
@@ -250,7 +254,10 @@ export function makeProvider(spec: ProviderSpec): InferenceProvider {
       );
     case "mock":
       // Offline smoke-testing seam: proposes nothing unless scripted.
-      return new MockProvider(spec.mockResponses ?? [{ json: {} }], model);
+      return new MockProvider(spec.mockResponses ?? [{ json: {} }], model, {
+        decisions: spec.mockDecisions,
+        stateLimit: spec.mockStateLimit,
+      });
     case "llama-cpp":
       return new LlamaCppProvider(model, {
         ...(spec.llamaCpp ?? {}),

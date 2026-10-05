@@ -1,6 +1,6 @@
 ---
 title: Providers reference
-description: Every ProviderSpec field, the factories, auto-detection, per-provider options, and the schema helpers.
+description: Every ProviderSpec field, the factories, auto-detection, per-provider options, the decision capability, and the schema helpers.
 sidebar:
   order: 1
 ---
@@ -42,6 +42,56 @@ interface TokenUsage {
 
 No streaming, no multi-turn, no tool loops.
 
+## Decisions
+
+A provider may also answer **decisions**: a probability for each of a fixed set of options, instead
+of generated text. It is an optional capability on top of the contract, not part of it, so check for
+it with `canDecide` ([ADR 01013](https://github.com/hawkeyexl/inference/blob/main/adrs/01013-decisions-as-an-optional-provider-capability.md)).
+
+```ts
+interface DecisionProvider extends InferenceProvider {
+  decide(req: DecideRequest): Promise<DecideResponse>;
+  stateLimit(): Promise<number>;  // tokens accepted for state plus the longest question
+}
+
+function canDecide(p: InferenceProvider): p is DecisionProvider;
+
+interface DecideRequest {
+  state: string | Record<string, unknown> | unknown[];
+  questions: Record<string, DecideQuestion>;  // keyed by question id, at least one
+}
+
+interface DecideQuestion {
+  type: "choice";
+  instructions: string;
+  criteria: Record<string, string>;  // option id -> what it means, at least two
+}
+
+interface DecideResponse {
+  answers: Record<string, DecideAnswer>;  // keyed by question id
+  usage?: TokenUsage;
+}
+
+interface DecideAnswer {
+  choice: string;                         // the most probable option id
+  probabilities: Record<string, number>;  // every option id, summing to 1
+  confidence: number;                     // probabilities[choice]
+}
+```
+
+`decide` rejects with an `InferenceError` when the request has no questions, an empty question or
+criterion id, a type other than `"choice"`, or fewer than two criteria on a question. Ties between
+options go to the one listed first in `criteria`.
+
+```ts
+const provider = makeProvider(spec);
+if (canDecide(provider)) {
+  const { answers } = await provider.decide(request);
+}
+```
+
+Of the built-in providers, `MockProvider` decides. See [mock](#mock).
+
 ## `ProviderSpec`
 
 ```ts
@@ -63,6 +113,8 @@ interface ProviderSpec {
   exec?: ExecFn;                 // test seam for claude-cli
   llamaRuntime?: LlamaRuntime;   // test seam for llama-cpp
   mockResponses?: MockResponse[];
+  mockDecisions?: MockDecisions; // mock only: scripted decisions
+  mockStateLimit?: number;       // mock only: what stateLimit() reports, default 8192
 }
 ```
 
@@ -169,9 +221,10 @@ class OpenAICompatProvider implements InferenceProvider {
 class ClaudeCliProvider implements InferenceProvider {
   constructor(model: string, command?: string, exec?: ExecFn, timeoutMs?: number);
 }
-class MockProvider implements InferenceProvider {
+class MockProvider implements DecisionProvider {
   readonly requests: CompleteJSONRequest[];
-  constructor(responses: MockResponse[], model?: string);
+  readonly decideRequests: DecideRequest[];
+  constructor(responses: MockResponse[], model?: string, options?: MockProviderOptions);
 }
 ```
 
@@ -205,6 +258,34 @@ function mockVerdict(
 
 Responses cycle when exhausted. An empty script throws. Default synthetic usage is
 `{ inputTokens: 500, outputTokens: 100 }`. `requests` records every request in order.
+
+### Mock decisions
+
+```ts
+type MockDecision = string | Record<string, number>;  // an option id, or weights over option ids
+type MockDecisions =
+  | Record<string, MockDecision>                    // keyed by question id
+  | ((questionId: string, question: DecideQuestion, state: DecideRequest["state"]) =>
+      MockDecision | undefined);
+
+interface MockProviderOptions {
+  decisions?: MockDecisions;
+  stateLimit?: number;  // default 8192
+}
+```
+
+An option id answers with probability 1. Weights are normalized to sum to 1, so `{ yes: 4, no: 1 }`
+answers `yes` with confidence 0.8. A question with no script gets uniform probabilities: the first
+option wins, with confidence `1 / options`. A scripted option id that is not one of the question's
+criteria rejects with an `InferenceError`. `decideRequests` records every `decide` request in order,
+and decisions report the same synthetic usage as `completeJSON`.
+
+```ts
+const provider = makeProvider({
+  provider: "mock",
+  mockDecisions: { hooks: "yes", tone: { plain: 1, hedged: 3 } },
+});
+```
 
 ## Schema helpers
 

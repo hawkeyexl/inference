@@ -24,3 +24,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01010](01010-restore-the-grammar-omitted-open-brace.md) | Restore the opening brace grammar-constrained generation omits, so the local provider works at all |
 | [01011](01011-size-the-local-context-to-the-prompt.md) | Size the local model's context to the prompt, not to free memory, with a `contextSize` override |
 | [01012](01012-isolate-local-inference-in-a-worker-process.md) | Run local inference in a worker process, and fall back from a GPU backend that crashes it |
+| [01013](01013-decisions-as-an-optional-provider-capability.md) | Add decisions as an optional provider capability, in Jev's request shape |
