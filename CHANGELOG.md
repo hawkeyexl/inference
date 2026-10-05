@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.4](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.3...v0.5.0-decide-and-host.4) (2026-10-05)
+
+
+### Features
+
+* **llama-cpp:** keep local models loaded across processes in a model host ([fdb83e8](https://github.com/hawkeyexl/inference/commit/fdb83e8c447fc3757e0634006dad7ab6080bae95))
+
 # [0.5.0-decide-and-host.3](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.2...v0.5.0-decide-and-host.3) (2026-10-05)
 
 
