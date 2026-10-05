@@ -235,7 +235,7 @@ describe("falling back from a crashing backend", () => {
     expect(run.error).toMatch(
       /crashed the local-model worker on every backend this machine offers — CUDA \(.*\), Vulkan \(.*\), CPU \(.*\)\. The request was not answered\./,
     );
-  });
+  }, 30_000); // three backends crash in turn, each a fresh worker; a slow runner needs more than 5s
 
   it.each(["init", "load"] as const)(
     "falls back from a crash during %s too",
