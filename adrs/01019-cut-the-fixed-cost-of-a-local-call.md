@@ -4,7 +4,7 @@ date: 2026-10-06
 decision-makers: [hawkeyexl]
 ---
 
-# Cut the fixed cost of a local call: read the top 40 tokens for a decision, and reuse one context
+# Cut the fixed cost of a local call: read the top 40 tokens for a decision, reuse one context, and generate compact JSON
 
 ## Context and Problem Statement
 
@@ -21,6 +21,11 @@ Every call also created a new 8192-token context, which took 165 to 220 ms. Open
 session resolved the model's chat template again, about 120 ms more. And sizing the context counted
 the system prompt and each of the 36 prompts in a round trip of its own to the worker, about 30 ms.
 
+A shared-prefix request with the reasoning first, 36 items, spent 97% of its time decoding, about
+123 tokens an item at about 111 tokens a second. node-llama-cpp's JSON-schema grammar allows a
+newline and indentation before every property and a space after every colon and comma, and the
+model took them up.
+
 No contract changes here: `decide()` answers the same shape, and the sizing rules of ADR 01011
 hold. This ADR records the trade-offs a later reader would otherwise re-litigate.
 
@@ -31,6 +36,7 @@ hold. This ADR records the trade-offs a later reader would otherwise re-litigate
 - Inference stays in the worker process (ADR 01012), and the worker imports only Node builtins.
 - A call never gets less context than ADR 01011 sizes for it, and memory follows the work.
 - A call never sees another call's tokens.
+- The answer must still satisfy the schema, and every value it allowed must still be expressible.
 
 ## Considered Options
 
@@ -46,12 +52,19 @@ For the context:
 - One idle context per model, reused when it fits
 - One context per model, grown to the largest call and kept
 
+For the grammar:
+
+- node-llama-cpp's grammar, as before
+- A grammar built from the schema by this library
+- node-llama-cpp's grammar, with its optional whitespace rewritten out
+
 ## Decision Outcome
 
 Chosen options: "Read the 40 most likely tokens, and the whole vocabulary when no letter is among
 them", because it keeps the cost of the common case and the answer of the rare one; and "One idle
 context per model, reused when it fits", because it removes the per-call setup without letting one
-large call pin its memory.
+large call pin its memory; and "node-llama-cpp's grammar, with its optional whitespace rewritten
+out", because it is the smallest change that leaves the schema's handling where it was.
 
 ### The readout
 
@@ -88,6 +101,23 @@ The chat template is resolved once per model, on its first session, and passed t
 And the provider's counts for one call reach the worker as one request: the parent collects every
 count asked for in one tick and sends them together.
 
+### Compact JSON
+
+node-llama-cpp 3.19's `createGrammarForJsonSchema` takes no option for whitespace, and the generator
+under it, which has an `allowNewLines` setting, is not exported. So the worker builds the grammar as
+before, rewrites its text with `compactJsonGrammar`, and compiles the result with `createGrammar`,
+keeping the stop sequence and whitespace trimming of the original. Both `completeJSON` and
+`completeJSONShared` generate under it.
+
+The rewrite relies on how node-llama-cpp spells whitespace: rules named `whitespace-…-rule`, which
+become empty; rules named `comma-whitespace-…-rule`, which become a bare comma; and an inline `[ ]?`
+after a colon, which is dropped wherever it stands outside a quoted literal or a character class.
+Nothing else changes. The root's trailing four newlines, the stop sequence a prompt ends on, stay.
+
+A string property's `maxLength` already reached the grammar, as a bounded repetition of string
+characters, and still does. A consumer that caps a reasoning string at 240 characters caps the
+tokens it costs.
+
 ### Consequences
 
 - Good, because the profiled probe drops from about 82 ms to about 24 ms a question.
@@ -95,6 +125,7 @@ count asked for in one tick and sends them together.
 - Good, because a call after the first opens its session in well under a millisecond, where creating
   the context and resolving the template took about 140 to 300 ms.
 - Good, because a call's counts cost one round trip, not one per prompt.
+- Good, because no output token goes to indentation or to a space between JSON tokens.
 - Neutral, because an option whose letter is not among the 40 gets probability 0 where it used to
   get a tiny one. On a question with 26 options, a model can spread its mass past 40 tokens; the
   options it gives the least are then 0.
@@ -103,6 +134,8 @@ count asked for in one tick and sends them together.
 - Bad, because a question that falls back costs two probes and one erase.
 - Bad, because a call can run in a context up to twice the size it needs, so peak memory can be up
   to twice what ADR 01011 sizes for one call.
+- Bad, because the rewrite depends on node-llama-cpp's rule names. A release that renames them
+  leaves the whitespace in, which costs tokens and breaks nothing; the grammar tests fail on it.
 
 ### Confirmation
 
@@ -113,7 +146,10 @@ with no letter among them is read again over the whole vocabulary. The fixture's
 creation, and the suite checks that a second call reuses the first's context, that a call needing
 more creates a larger one, that one more than twice too large is not kept, that a reused context
 starts empty, that a replacement worker creates its own after a crash, and that a call's counts are
-one request.
+one request. `test/unit/llama-grammar.test.ts` rewrites the grammar node-llama-cpp generates and
+checks the text, then compiles it with the real binding on the CPU and asks llama.cpp's grammar
+engine what it accepts: compact JSON, not spaced or pretty-printed JSON, and no string past its
+`maxLength`.
 
 ### Commit type
 
@@ -154,3 +190,19 @@ one request.
 - Good, because no call after the largest ever creates a context.
 - Bad, because one long prompt pins its context for as long as the model stays loaded, which is the
   memory problem ADR 01011 fixed.
+
+### node-llama-cpp's grammar, as before
+
+- Good, because it needs no code.
+- Bad, because a model that pretty-prints pays for every newline and indent.
+
+### A grammar built from the schema by this library
+
+- Good, because it would control every byte the model may write.
+- Bad, because it reimplements node-llama-cpp's whole schema support, `$ref`, `oneOf`, formats and
+  lengths, and the two would drift.
+
+### node-llama-cpp's grammar, with its optional whitespace rewritten out (chosen)
+
+- Good, because the schema's handling stays node-llama-cpp's.
+- Bad, because it reads node-llama-cpp's rule names, which are not a public interface.

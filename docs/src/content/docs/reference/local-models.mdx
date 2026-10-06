@@ -282,7 +282,10 @@ interface LlamaCppProviderOptions {
 ```
 
 A fresh session per call — the contract is single-shot. The schema is compiled to a GBNF grammar
-**and** restated in the system prompt, because the grammar hides descriptions from the model.
+**and** restated in the system prompt, because the grammar hides descriptions from the model. The
+grammar admits compact JSON only, with no space or newline between tokens, so no output tokens go
+to indentation. A string property's `maxLength` caps it in the grammar, so the model cannot write
+past it.
 Truncation at `maxTokens` is reported as an error naming the limit rather than a validation failure.
 
 ### Context size

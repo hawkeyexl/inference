@@ -269,6 +269,61 @@ function isCompleteJson(text: string): boolean {
   return false;
 }
 
+/**
+ * node-llama-cpp's JSON-schema grammar with every optional space and newline
+ * between tokens taken out, so the model writes compact JSON. Its grammar
+ * allows pretty-printing, and a model that takes it up spends tokens on
+ * indentation: 97% of a reasoning-first shared-prefix request was decoding.
+ * node-llama-cpp 3.19 has no option for this, so the grammar text it builds is
+ * rewritten here. ADR 01019.
+ *
+ * The rewrite relies on how node-llama-cpp spells whitespace: rules named
+ * `whitespace-…-rule` and `comma-whitespace-…-rule`, and an inline `[ ]?`
+ * after a colon. The first become empty and a bare comma; the last is dropped
+ * wherever it stands outside a quoted literal or a character class. Everything
+ * else, `maxLength` and the root's trailing stop sequence among it, is left as
+ * it was.
+ */
+export function compactJsonGrammar(gbnf: string): string {
+  return gbnf
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf(" ::= ");
+      if (at < 0) return line;
+      const name = line.slice(0, at);
+      if (/^comma-whitespace-.*-rule$/.test(name)) return `${name} ::= ","`;
+      if (/^whitespace-.*-rule$/.test(name)) return `${name} ::= ""`;
+      return `${name} ::= ${withoutOptionalSpaces(line.slice(at + " ::= ".length))}`;
+    })
+    .join("\n");
+}
+
+/** A rule body without its `[ ]?` terms, skipping quoted literals and character classes whole. */
+function withoutOptionalSpaces(body: string): string {
+  let out = "";
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i]!;
+    if (c !== '"' && c !== "[") {
+      out += c;
+      i++;
+      continue;
+    }
+    const close = c === '"' ? '"' : "]";
+    let j = i + 1;
+    while (j < body.length && body[j] !== close) j += body[j] === "\\" ? 2 : 1;
+    const term = body.slice(i, j + 1);
+    if (term === "[ ]" && body[j + 1] === "?") {
+      // The term, its `?`, and the space that separated it from the next.
+      i = j + 2 + (body[j + 2] === " " ? 1 : 0);
+      continue;
+    }
+    out += term;
+    i = j + 1;
+  }
+  return out.trimEnd();
+}
+
 /** Tokens every prompt starts with, leaving each at least one of its own. */
 function sharedPrefixLength(rendered: number[][]): number {
   const [first, ...rest] = rendered;
@@ -449,6 +504,18 @@ async function nodeLlamaCppBackend(
     ...(options.build ? { build: options.build } : {}),
   });
 
+  /** The schema's grammar, compact: see `compactJsonGrammar`. */
+  const jsonGrammar = async (schema: Record<string, unknown>): Promise<LlamaGrammar> => {
+    const full = await llama.createGrammarForJsonSchema(
+      schema as Parameters<typeof llama.createGrammarForJsonSchema>[0],
+    );
+    return llama.createGrammar({
+      grammar: compactJsonGrammar(full.grammar),
+      stopGenerationTriggers: full.stopGenerationTriggers,
+      trimWhitespaceSuffix: full.trimWhitespaceSuffix,
+    });
+  };
+
   return {
     gpu: llama.gpu,
 
@@ -522,11 +589,7 @@ async function nodeLlamaCppBackend(
                     // shares it, and each gets an evaluation state of its own.
                     let grammar = grammars.get(generateOptions.schema);
                     if (!grammar) {
-                      grammar = await llama.createGrammarForJsonSchema(
-                        generateOptions.schema as Parameters<
-                          typeof llama.createGrammarForJsonSchema
-                        >[0],
-                      );
+                      grammar = await jsonGrammar(generateOptions.schema);
                       grammars.set(generateOptions.schema, grammar);
                     }
                     yield* sequence.evaluate(tokens as Token[], {
@@ -563,11 +626,7 @@ async function nodeLlamaCppBackend(
                   },
                 },
                 async prompt(text, promptOptions) {
-                  const grammar = await llama.createGrammarForJsonSchema(
-                    promptOptions.schema as Parameters<
-                      typeof llama.createGrammarForJsonSchema
-                    >[0],
-                  );
+                  const grammar = await jsonGrammar(promptOptions.schema);
                   const before = sequence.tokenMeter.getState();
                   const result = await session.promptWithMeta(text, {
                     grammar,
