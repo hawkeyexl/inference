@@ -165,13 +165,16 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
       record(`prefix ${label(gpu)} ${process.pid}`);
       evaluate(kept);
     },
-    async probe(more) {
-      record(`decide ${label(gpu)} ${process.pid}`);
+    /** With `topK`, only that many of the most likely tokens, as llama.cpp's sampler returns. */
+    async probe(more, topK) {
+      record(`decide ${label(gpu)} ${process.pid} ${topK ?? "all"}`);
       if (abortAt === "decide") crash(gpu);
       evaluate(more);
       const held = holding(answers);
-      const weights = held === undefined ? {} : answers[held];
-      return new Map(Object.entries(weights).map(([letter, p]) => [letter.codePointAt(0), p]));
+      const weights = Object.entries(held === undefined ? {} : answers[held])
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, topK ?? Infinity);
+      return new Map(weights.map(([letter, p]) => [letter.codePointAt(0), p]));
     },
     /** Evaluate `more`, then yield the scripted text one character at a time; the end is EOG. */
     async *generate(more) {

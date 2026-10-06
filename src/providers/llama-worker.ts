@@ -79,8 +79,11 @@ export interface DecideSequence {
   evaluate(tokens: number[]): Promise<void>;
   /** Snapshot the state here, when `needsCheckpoints`; otherwise nothing. */
   takeCheckpoint(): Promise<void>;
-  /** Evaluate `tokens` and return the next-token distribution after the last one. */
-  probe(tokens: number[]): Promise<Map<number, number>>;
+  /**
+   * Evaluate `tokens` and return the next-token distribution after the last
+   * one: the whole vocabulary, or with `topK` only the `topK` most likely.
+   */
+  probe(tokens: number[], topK?: number): Promise<Map<number, number>>;
   /** Remove tokens `[start, end)`, restoring or re-evaluating what remains as needed. */
   erase(start: number, end: number): Promise<void>;
   /**
@@ -107,7 +110,8 @@ export interface DecideSequence {
 async function onSharedStart<T>(
   sequence: DecideSequence,
   rendered: number[][],
-  each: (tail: number[], i: number) => Promise<T>,
+  /** `rewind` erases back to the shared start, so a prompt can run its tail again. */
+  each: (tail: number[], i: number, rewind: () => Promise<void>) => Promise<T>,
 ): Promise<{ results: T[]; inputTokens: number; reuse?: LlamaDecideReuse }> {
   const shared = sharedPrefixLength(rendered);
   const start = sequence.inputTokens();
@@ -123,7 +127,9 @@ async function onSharedStart<T>(
       if (sequence.inputTokens() > before) reuse = "reevaluate";
       else reuse ??= sequence.needsCheckpoints ? "checkpoint" : "erase";
     }
-    results.push(await each(tokens.slice(shared), i));
+    results.push(
+      await each(tokens.slice(shared), i, () => sequence.erase(shared, sequence.nextTokenIndex)),
+    );
   }
   return {
     results,
@@ -140,10 +146,20 @@ function sequenceOf(session: WorkerSession): DecideSequence {
 }
 
 /**
+ * How many of the most likely next tokens a decision reads. The whole
+ * vocabulary is six figures of entries, and building that distribution was
+ * most of a question's cost. A label outside these weighs 0. ADR 01019.
+ */
+const DECIDE_TOP_K = 40;
+
+/**
  * Answer a decision on one session. Every prompt is rendered whole, and the
  * tokens all prompts share are evaluated once. Each question then evaluates
- * only its own tail, reads the next-token probability of its labels, and is
- * erased back to the shared start for the next. ADR 01016.
+ * only its own tail, reads the next-token probability of its labels among the
+ * `DECIDE_TOP_K` most likely tokens, and is erased back to the shared start
+ * for the next. A question none of whose labels is among them is read again
+ * over the whole vocabulary, so its weights are never all 0 for want of
+ * looking. ADR 01016, ADR 01019.
  */
 export async function decideOn(
   session: WorkerSession,
@@ -154,20 +170,27 @@ export async function decideOn(
   const { results, inputTokens, reuse } = await onSharedStart(
     sequence,
     rendered,
-    async (tail, i) => {
-      const next = await sequence.probe(tail);
-      const labels = options.labels[i] ?? [];
-      return Object.fromEntries(
-        labels.map((label) => {
-          const ids = new Set(sequence.labelTokens(label));
-          if (ids.size === 0) {
-            throw new Error(
-              `The model has no single token for the answer label "${label}", so it cannot decide.`,
-            );
-          }
-          return [label, [...ids].reduce((sum, id) => sum + (next.get(id) ?? 0), 0)];
-        }),
-      );
+    async (tail, i, rewind) => {
+      const labels = (options.labels[i] ?? []).map((label) => {
+        const ids = [...new Set(sequence.labelTokens(label))];
+        if (ids.length === 0) {
+          throw new Error(
+            `The model has no single token for the answer label "${label}", so it cannot decide.`,
+          );
+        }
+        return { label, ids };
+      });
+      const weigh = (next: Map<number, number>): Record<string, number> =>
+        Object.fromEntries(
+          labels.map(({ label, ids }) => [
+            label,
+            ids.reduce((sum, id) => sum + (next.get(id) ?? 0), 0),
+          ]),
+        );
+      const weights = weigh(await sequence.probe(tail, DECIDE_TOP_K));
+      if (labels.length === 0 || Object.values(weights).some((w) => w > 0)) return weights;
+      await rewind();
+      return weigh(await sequence.probe(tail));
     },
   );
   return {
@@ -436,17 +459,22 @@ async function nodeLlamaCppBackend(
                 sequence.evaluateWithoutGeneratingNewTokens(tokens as Token[]),
               takeCheckpoint: () => sequence.takeCheckpoint(),
               erase: (start, end) => sequence.eraseContextTokenRanges([{ start, end }]),
-              async probe(tokens) {
+              async probe(tokens, topK) {
                 const last = tokens.length - 1;
+                // Temperature 0 samples greedily, so its distribution is the
+                // softmax over the whole vocabulary. With topK, temperature 1
+                // keeps the softmax as it is, truncated to the topK most likely
+                // tokens; topP 1 stops node-llama-cpp's default 0.95 from
+                // cutting that short. Ratios between tokens are unchanged.
+                const generateNext = {
+                  probabilities: true,
+                  ...(topK != null ? { options: { topK, topP: 1, minP: 0, temperature: 1 } } : {}),
+                };
                 const output = await sequence.controlledEvaluate(
                   (tokens as Token[]).map((token, i) =>
-                    i === last
-                      ? [token, { generateNext: { probabilities: true } }]
-                      : token,
+                    i === last ? [token, { generateNext }] : token,
                   ),
                 );
-                // Temperature 0 samples greedily, so this is the softmax over
-                // the whole vocabulary, untruncated by top-k or top-p.
                 return output[last]?.next.probabilities ?? new Map<number, number>();
               },
             },

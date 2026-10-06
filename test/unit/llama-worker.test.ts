@@ -453,6 +453,58 @@ describe("decisions in the worker", () => {
     expect(response.answers["hooks"]!.choice).toBe("yes");
   });
 
+  /** 40 tokens other than the letters, each more likely than `p` of the mass. */
+  const crowd = (p: number): Record<string, number> =>
+    Object.fromEntries([..."abcdefghijklmnopqrstuvwxyz0123456789!@#$"].map((c) => [c, p]));
+  /** How each probe read the distribution: "40" or "all". */
+  const readouts = (): string[] =>
+    readFileSync(log, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("decide "))
+      .map((line) => line.split(" ")[3]!);
+
+  it("reads only the 40 most likely tokens, so a letter outside them weighs nothing", async () => {
+    configure({
+      decide: {
+        sequence: "hybrid",
+        answers: { "skip a git hook": { A: 0.3, B: 0.001, ...crowd(0.01) } },
+      },
+    });
+    const { response } = await decide({
+      state: STATE,
+      questions: { hooks: DECIDE.questions["hooks"]! },
+    });
+    // B is not among the 40, so it weighs 0, and the letters present still sum to 1.
+    expect(response.answers["hooks"]).toEqual({
+      choice: "yes",
+      probabilities: { yes: 1, no: 0 },
+      confidence: 1,
+    });
+    expect(readouts()).toEqual(["40"]);
+  });
+
+  it("reads the whole distribution when no letter is among the 40, so a decision is never empty", async () => {
+    configure({
+      decide: {
+        sequence: "hybrid",
+        answers: {
+          "skip a git hook": { A: 0.001, B: 0.003, ...crowd(0.02) },
+          "run the tests": { B: 0.9 },
+        },
+      },
+    });
+    const { response, result } = await decide({
+      state: STATE,
+      questions: { hooks: DECIDE.questions["hooks"]!, tests: DECIDE.questions["tests"]! },
+    });
+    expect(response.answers["hooks"]!.choice).toBe("no");
+    expect(response.answers["hooks"]!.probabilities["no"]).toBeCloseTo(0.75);
+    expect(response.answers["tests"]!.choice).toBe("no");
+    expect(readouts()).toEqual(["40", "all", "40"]);
+    // The re-read went back to the shared state the way the next question does.
+    expect(result.reuse).toBe("checkpoint");
+  });
+
   it("falls back from a backend that crashes mid-decision", async () => {
     configureDecisions("hybrid", { abort: { cuda: "decide" } });
     const { response } = await decide();

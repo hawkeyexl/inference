@@ -340,7 +340,8 @@ Reply with the letter of one option.
 The model's chat template wraps the turn, and the assistant's turn opens with `Answer:`. The
 provider reads the next-token probability of each letter, summed over the letter's token with and
 without a leading space, and [normalizes](/inference/reference/providers/#decisions) them over the
-options. Thinking is off: Qwen3 and Qwen3.5 get the empty think block their template uses for that,
+options. It reads them among the 40 most likely next tokens, and a letter outside those weighs 0.
+A question with no letter among them is read again over the whole vocabulary. Thinking is off: Qwen3 and Qwen3.5 get the empty think block their template uses for that,
 and Gemma 4 gets its non-reasoning prompt. Nothing is generated, so `usage.outputTokens` is 0.
 
 Every question of a request runs on one session, and the state is evaluated once. After each
