@@ -199,6 +199,7 @@ interface AnthropicProviderOptions {
 
 interface OpenAICompatProviderOptions {
   schemaName?: string;      // default "result" — also prompt surface
+  maxTokens?: number;       // default 4096, sent as max_tokens
 }
 
 interface JevProviderOptions {
@@ -254,7 +255,9 @@ concrete arguments.
 - **`OpenAICompatProvider`** prefers strict `json_schema`. On an error matching
   `/response_format|json_schema|schema/i`, **or a bare `HTTP 400`**, it permanently falls back to
   `json_object` with the schema restated in the prompt. Keyless is allowed unless `baseUrl` contains
-  `api.openai.com`.
+  `api.openai.com`. Every request carries `max_tokens` from `openai.maxTokens` (default 4096). A
+  server that reserves credit for the model's whole output window, as OpenRouter does, refuses an
+  uncapped request on a small budget. A response that stops at the cap throws as itself.
 - **`ClaudeCliProvider`** runs `claude -p --append-system-prompt <system> --output-format json
   --model <model>`, sends the user prompt and restated schema over **stdin**, and unwraps a
   `{ result: string }` envelope. Reports **no usage**.

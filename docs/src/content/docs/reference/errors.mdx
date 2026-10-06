@@ -448,6 +448,13 @@ to fail validation, which would have burned the retry on a misleading error.
 
 **Fix:** raise `anthropic.maxTokens` (default 1024).
 
+### `OpenAI-compatible response hit max_tokens (<N>) before the JSON was complete — raise the openai.maxTokens option.`
+
+The response stopped at the output cap (`finish_reason: "length"`) with the JSON unfinished.
+Reported as itself rather than as a parse or validation failure.
+
+**Fix:** raise `openai.maxTokens` (default 4096).
+
 ### `Anthropic response contained no tool_use block`
 
 The response came back without the forced tool call. Rare; usually a refusal.
