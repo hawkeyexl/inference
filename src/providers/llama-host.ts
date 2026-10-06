@@ -24,7 +24,7 @@ import {
   isModuleNotFound,
   nodeLlamaCppShimUrl,
 } from "./llama-install.js";
-import { WORKER_ENV_FLAG, decideOn, openBackend } from "./llama-worker.js";
+import { WORKER_ENV_FLAG, completeSharedOn, decideOn, openBackend } from "./llama-worker.js";
 import type {
   WorkerBackend,
   WorkerBackendOptions,
@@ -41,6 +41,8 @@ import type {
   LlamaPromptResult,
   LlamaRuntime,
   LlamaSession,
+  LlamaSharedOptions,
+  LlamaSharedResult,
 } from "./llama-cpp.js";
 
 /**
@@ -631,6 +633,7 @@ class WorkerModelProxy {
       contextSize: session.contextSize,
       prompt: (text, options) => session.prompt(text, options),
       decide: (options) => session.decide(options),
+      completeShared: (options) => session.completeShared(options),
       dispose: () => session.dispose(),
     };
   }
@@ -707,6 +710,17 @@ class WorkerSessionProxy {
     );
   }
 
+  /** Like a decision: a retry starts over, every item, on a fresh session. */
+  completeShared(options: LlamaSharedOptions): Promise<LlamaSharedResult> {
+    return this.slot.run(async (host) =>
+      host.request<LlamaSharedResult>({
+        op: "completeShared",
+        sessionId: await this.on(host),
+        options,
+      }),
+    );
+  }
+
   async dispose(): Promise<void> {
     await Promise.all(
       [...this.ids].map(async ([host, id]) => {
@@ -751,7 +765,7 @@ function inProcessRuntime(gpu: LlamaGpu): LlamaRuntime {
   };
 }
 
-/** An in-process model whose sessions decide here, as the worker's would there. */
+/** An in-process model whose sessions decide and complete here, as the worker's would there. */
 function deciding(model: WorkerModel): LlamaLoadedModel {
   return {
     trainContextSize: model.trainContextSize,
@@ -763,6 +777,7 @@ function deciding(model: WorkerModel): LlamaLoadedModel {
         contextSize: session.contextSize,
         prompt: (text, options) => session.prompt(text, options),
         decide: (options) => decideOn(session, options),
+        completeShared: (options) => completeSharedOn(session, options),
         dispose: () => session.dispose(),
       };
     },

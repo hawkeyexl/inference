@@ -21,6 +21,9 @@ export type {
   ExecOptions,
   ExecResult,
   InferenceProvider,
+  SharedJSONAnswer,
+  SharedJSONRequest,
+  SharedJSONResponse,
   TokenUsage,
 } from "./providers/types.js";
 
@@ -114,6 +117,8 @@ export type {
   LlamaPromptResult,
   LlamaRuntime,
   LlamaSession,
+  LlamaSharedOptions,
+  LlamaSharedResult,
   ModelHostMode,
 } from "./providers/llama-cpp.js";
 export {
@@ -155,7 +160,7 @@ export type {
 export { realExec } from "./exec.js";
 
 // Completion
-export { completeValidatedJSON, validatorFor } from "./complete.js";
+export { completeJSONShared, completeValidatedJSON, validatorFor } from "./complete.js";
 export type {
   CompleteValidatedOptions,
   InferenceRun,

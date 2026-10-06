@@ -11,7 +11,7 @@
  * inherits at fork time:
  *
  *   available      GPU backends this "machine" offers, best first (default cuda, vulkan)
- *   abort          { cuda | vulkan | cpu: "init" | "load" | "prompt" | "decide" } — where that backend aborts
+ *   abort          { cuda | vulkan | cpu: "init" | "load" | "prompt" | "decide" | "generate" } — where that backend aborts
  *   throwOnPrompt  an ordinary error message every prompt throws
  *   delayMs        how long a prompt takes, so concurrent calls overlap
  *   log            a file each init, load, prompt and decision probe is appended to, for the test to read
@@ -21,6 +21,12 @@
  *                              checkpoint restores a prefix), or "hybrid-without-checkpoints"
  *                              (nothing does, so a prefix is evaluated again)
  *                    answers   { "<text only one question holds>": { "<letter>": probability } }
+ *   sequence       the same choice of sequence for completeJSONShared (default: decide's, else "attention")
+ *   shared         { outputs } — what completeJSONShared generates for each item:
+ *                    outputs   { "<text only one item holds>": "<generated text>" | { throw: "<message>" } }
+ *
+ * The log also records "prefix" each time the shared tokens are evaluated: once
+ * up front, and again whenever an erase could not keep them.
  */
 import { appendFileSync, writeSync } from "node:fs";
 import { basename } from "node:path";
@@ -108,7 +114,8 @@ export async function createWorkerBackend(options, hooks) {
  * evaluate, checkpoint, probe, erase. Only the probabilities are scripted.
  */
 function fakeSequence(systemPrompt, gpu, abortAt) {
-  const kind = config.decide?.sequence ?? "attention";
+  const kind = config.sequence ?? config.decide?.sequence ?? "attention";
+  const outputs = config.shared?.outputs ?? {};
   const answers = config.decide?.answers ?? {};
   const encode = (text) => [...text].map((c) => c.codePointAt(0));
   let tokens = [];
@@ -117,6 +124,15 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
   const evaluate = (more) => {
     tokens.push(...more);
     input += more.length;
+  };
+  /** The scripted keys the context holds now; more than one is a reuse bug. */
+  const holding = (scripted) => {
+    const text = String.fromCodePoint(...tokens);
+    const held = Object.keys(scripted).filter((key) => text.includes(key));
+    if (held.length > 1) {
+      throw new Error(`The fake sequence holds ${held.length} questions at once: ${held.join(", ")}.`);
+    }
+    return held[0];
   };
   return {
     get needsCheckpoints() {
@@ -129,7 +145,9 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
     render: (user, answerPrefix) =>
       encode(`<system>${systemPrompt}</system><user>${user}</user><assistant>${answerPrefix}`),
     labelTokens: (label) => encode(label),
+    detokenize: (some) => String.fromCodePoint(...some),
     async evaluate(more) {
+      record(`prefix ${label(gpu)} ${process.pid}`);
       evaluate(more);
     },
     async takeCheckpoint() {
@@ -144,19 +162,30 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
         return;
       }
       // No state survives the erase: evaluate what is left from scratch.
+      record(`prefix ${label(gpu)} ${process.pid}`);
       evaluate(kept);
     },
     async probe(more) {
       record(`decide ${label(gpu)} ${process.pid}`);
       if (abortAt === "decide") crash(gpu);
       evaluate(more);
-      const text = String.fromCodePoint(...tokens);
-      const held = Object.keys(answers).filter((key) => text.includes(key));
-      if (held.length > 1) {
-        throw new Error(`The fake sequence holds ${held.length} questions at once: ${held.join(", ")}.`);
-      }
-      const weights = held.length === 1 ? answers[held[0]] : {};
+      const held = holding(answers);
+      const weights = held === undefined ? {} : answers[held];
       return new Map(Object.entries(weights).map(([letter, p]) => [letter.codePointAt(0), p]));
+    },
+    /** Evaluate `more`, then yield the scripted text one character at a time; the end is EOG. */
+    async *generate(more) {
+      record(`generate ${label(gpu)} ${process.pid}`);
+      if (abortAt === "generate") crash(gpu);
+      evaluate(more);
+      const held = holding(outputs);
+      const output = held === undefined ? "{}" : outputs[held];
+      if (typeof output === "object") throw new Error(output.throw);
+      for (const token of encode(output)) {
+        // A yielded token is in the context from here on, as node-llama-cpp's are.
+        tokens.push(token);
+        yield token;
+      }
     },
   };
 }

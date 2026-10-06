@@ -199,6 +199,7 @@ class ModelHost {
         return;
       case "completeJSON":
       case "decide":
+      case "completeJSONShared":
       case "stateLimit":
       case "lease":
         this.enqueue(frame, socket);
@@ -354,6 +355,8 @@ class ModelHost {
         return provider.completeJSON(frame.request);
       case "decide":
         return provider.decide(frame.request);
+      case "completeJSONShared":
+        return provider.completeJSONShared(frame.request);
       case "stateLimit":
         return provider.stateLimit();
       case "lease":

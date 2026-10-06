@@ -8,8 +8,16 @@
  */
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
+import { InferenceError } from "./types.js";
 import { warnIfUnsupportedNode } from "./runtime.js";
-import type { InferenceProvider, TokenUsage } from "./providers/types.js";
+import type {
+  InferenceProvider,
+  SharedJSONAnswer,
+  SharedJSONProvider,
+  SharedJSONRequest,
+  SharedJSONResponse,
+  TokenUsage,
+} from "./providers/types.js";
 
 /** One attempt at a schema-constrained completion. */
 export interface InferenceRun<T = unknown> {
@@ -100,12 +108,91 @@ export async function completeValidatedJSON<T = unknown>(
           durationMs: Date.now() - start,
         };
       }
-      lastError = `Response failed schema validation: ${(validate.errors ?? [])
-        .map((e) => `${e.instancePath} ${e.message}`)
-        .join("; ")}`;
+      lastError = schemaFailure(validate);
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
     }
   }
   return { ...base, error: lastError, durationMs: Date.now() - start };
+}
+
+function schemaFailure(validate: ValidateFunction): string {
+  return `Response failed schema validation: ${(validate.errors ?? [])
+    .map((e) => `${e.instancePath} ${e.message}`)
+    .join("; ")}`;
+}
+
+/** Calls in flight at once when a provider has no native shared-prefix path. */
+const DEFAULT_SHARED_CONCURRENCY = 8;
+
+function hasSharedPath(provider: InferenceProvider): provider is SharedJSONProvider {
+  return typeof (provider as Partial<SharedJSONProvider>).completeJSONShared === "function";
+}
+
+/**
+ * N schema-validated answers over one shared prefix: item i is answered for
+ * the user turn `shared + items[i]`. ADR 01018.
+ *
+ * The local provider evaluates the prefix once and generates each answer from
+ * it. Every other provider gets one `completeValidatedJSON` call per item, at
+ * most `concurrency` at a time. Either way a failed item is recorded as an
+ * `error` in its place, never dropped and never coerced; the call itself
+ * rejects only when nothing can be answered (no model, a host that is gone).
+ */
+export async function completeJSONShared(
+  provider: InferenceProvider,
+  req: SharedJSONRequest,
+): Promise<SharedJSONResponse> {
+  warnIfUnsupportedNode();
+  const concurrency = req.concurrency ?? DEFAULT_SHARED_CONCURRENCY;
+  if (!(Number.isInteger(concurrency) && concurrency > 0)) {
+    throw new InferenceError(
+      `completeJSONShared concurrency must be a positive integer, got ${String(concurrency)}.`,
+    );
+  }
+  if (req.items.length === 0) return { answers: [] };
+  const validate = validatorFor(req.schema);
+  const temperature = req.temperature ?? 0;
+
+  if (hasSharedPath(provider)) {
+    // The grammar shapes a local answer but does not check every keyword
+    // (bounds, formats), so the native path is validated here like the rest.
+    const response = await provider.completeJSONShared({ ...req, temperature });
+    return {
+      ...response,
+      answers: response.answers.map((answer): SharedJSONAnswer =>
+        "error" in answer || validate(answer.json)
+          ? answer
+          : { error: schemaFailure(validate) },
+      ),
+    };
+  }
+
+  const answers: SharedJSONAnswer[] = new Array<SharedJSONAnswer>(req.items.length);
+  let usage: TokenUsage | undefined;
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < req.items.length) {
+      const i = next++;
+      const run = await completeValidatedJSON({
+        provider,
+        system: req.system,
+        user: req.shared + req.items[i]!,
+        schema: req.schema,
+        temperature,
+        validate,
+      });
+      answers[i] = run.error !== undefined ? { error: run.error } : { json: run.result };
+      if (run.usage) {
+        usage = {
+          inputTokens: (usage?.inputTokens ?? 0) + run.usage.inputTokens,
+          outputTokens: (usage?.outputTokens ?? 0) + run.usage.outputTokens,
+        };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, req.items.length) }, lane),
+  );
+  return { answers, ...(usage ? { usage } : {}) };
 }

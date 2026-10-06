@@ -34,6 +34,9 @@ import type { LlamaGpu } from "./llama-host.js";
 import type {
   CompleteJSONRequest,
   CompleteJSONResponse,
+  SharedJSONProvider,
+  SharedJSONRequest,
+  SharedJSONResponse,
   TokenUsage,
 } from "./types.js";
 
@@ -89,8 +92,37 @@ export interface LlamaDecideResult {
   reuse?: LlamaDecideReuse;
 }
 
+/**
+ * A shared-prefix request, as the provider hands it to a session: one whole
+ * user turn per item, all opening with the same text, so the runtime can
+ * evaluate that start once. ADR 01018.
+ */
+export interface LlamaSharedOptions {
+  /** One user turn per item. */
+  prompts: string[];
+  /** JSON Schema every answer is generated under, as a grammar. */
+  schema: Record<string, unknown>;
+  temperature: number;
+  /** Per item. Absent: until the answer is complete. */
+  maxTokens?: number;
+}
+
+export interface LlamaSharedResult {
+  /** Per prompt: the generated text, or why generation failed. */
+  outputs: ({ text: string; stopReason?: string } | { error: string })[];
+  usage?: TokenUsage;
+  /** Absent for a single prompt, which reuses nothing. */
+  reuse?: LlamaDecideReuse;
+}
+
 export interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  /**
+   * Generate one answer per prompt, evaluating their shared start once.
+   * Optional: a runtime without it makes `completeJSONShared` reject. The
+   * real runtime has it.
+   */
+  completeShared?(options: LlamaSharedOptions): Promise<LlamaSharedResult>;
   /**
    * Next-token probabilities for each prompt's labels. Optional: a runtime
    * without it makes `decide()` reject. The real runtime has it.
@@ -292,7 +324,7 @@ const DECIDE_SYSTEM_PROMPT =
 
 const DECIDE_ANSWER_PREFIX = "Answer:";
 
-export class LlamaCppProvider implements DecisionProvider {
+export class LlamaCppProvider implements DecisionProvider, SharedJSONProvider {
   private readonly uri: string;
   private readonly runtime: LlamaRuntime;
   private readonly thoughtTokens: number;
@@ -426,26 +458,102 @@ export class LlamaCppProvider implements DecisionProvider {
         thoughtTokens: this.thoughtTokens,
         ...(maxTokens != null ? { maxTokens } : {}),
       });
-      // A run cut off at the token or context limit leaves truncated JSON.
-      // Without this it surfaces as "failed schema validation" — or worse,
-      // extractJson's brace-slicing fallback salvages a wrong-but-parseable
-      // object — and the retry burns another full local inference to fail the
-      // same way. Same guard as the Anthropic provider's max_tokens check.
-      if (result.stopReason === "maxTokens" && implicitMaxTokens != null) {
-        throw new Error(
-          `llama-cpp generation filled the ${contextSize}-token context before ` +
-            `completing the JSON — raise llamaCpp.contextSize, or set ` +
-            `llamaCpp.maxTokens to bound the response.`,
+      return {
+        json: this.parseGenerated(result, contextSize, implicitMaxTokens != null),
+        usage: result.usage,
+      };
+    } finally {
+      await session.dispose().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Parse what a grammar-constrained generation produced. A run cut off at the
+   * token or context limit leaves truncated JSON. Without the guard it
+   * surfaces as "failed schema validation" — or worse, extractJson's
+   * brace-slicing fallback salvages a wrong-but-parseable object — and the
+   * retry burns another full local inference to fail the same way. Same guard
+   * as the Anthropic provider's max_tokens check.
+   */
+  private parseGenerated(
+    result: { text: string; stopReason?: string },
+    contextSize: number,
+    /** The cap was the room left in the context, not `maxTokens`. */
+    contextFull: boolean,
+  ): unknown {
+    if (result.stopReason === "maxTokens" && contextFull) {
+      throw new Error(
+        `llama-cpp generation filled the ${contextSize}-token context before ` +
+          `completing the JSON — raise llamaCpp.contextSize, or set ` +
+          `llamaCpp.maxTokens to bound the response.`,
+      );
+    }
+    if (result.stopReason === "maxTokens") {
+      throw new Error(
+        `llama-cpp generation hit the token limit before completing the JSON` +
+          `${this.maxTokens != null ? ` (maxTokens: ${this.maxTokens})` : ""}` +
+          ` — raise llamaCpp.maxTokens, or shorten the prompt if the context is full.`,
+      );
+    }
+    return extractJson(restoreOpenBrace(result.text));
+  }
+
+  /**
+   * One answer per item over a shared prefix, generated under the schema's
+   * grammar. One session serves every item, so the prefix is evaluated once,
+   * with thinking off as for decisions. Use `completeJSONShared`, which
+   * validates each answer; this is its native path. ADR 01018.
+   */
+  async completeJSONShared(req: SharedJSONRequest): Promise<SharedJSONResponse> {
+    if (req.items.length === 0) return { answers: [] };
+    return this.route
+      ? callModelHost(this.route, { op: "completeJSONShared", request: req }, () =>
+          this.sharedHere(req),
+        )
+      : this.sharedHere(req);
+  }
+
+  private async sharedHere(req: SharedJSONRequest): Promise<SharedJSONResponse> {
+    const systemPrompt = systemPromptFor(req);
+    const prompts = req.items.map((item) => req.shared + item);
+    const model = await this.load();
+    // The session holds one item at a time, so the longest sizes it.
+    const plan = await this.contextFor(model, systemPrompt, prompts);
+    const session = await model.createSession(systemPrompt, plan.contextSize);
+    try {
+      if (!session.completeShared) {
+        throw new InferenceError(
+          "This llama-cpp runtime's sessions have no completeShared(), so the " +
+            "provider cannot answer over a shared prefix.",
         );
       }
-      if (result.stopReason === "maxTokens") {
-        throw new Error(
-          `llama-cpp generation hit the token limit before completing the JSON` +
-            `${this.maxTokens != null ? ` (maxTokens: ${this.maxTokens})` : ""}` +
-            ` — raise llamaCpp.maxTokens, or shorten the prompt if the context is full.`,
-        );
-      }
-      return { json: extractJson(restoreOpenBrace(result.text)), usage: result.usage };
+      const contextSize = session.contextSize ?? plan.contextSize;
+      const implicitMaxTokens =
+        this.maxTokens == null && plan.promptTokens != null
+          ? contextSize - plan.promptTokens
+          : undefined;
+      const maxTokens = this.maxTokens ?? implicitMaxTokens;
+      const result = await session.completeShared({
+        prompts,
+        schema: req.schema,
+        temperature: req.temperature ?? 0,
+        ...(maxTokens != null ? { maxTokens } : {}),
+      });
+      const answers = prompts.map((_, i) => {
+        const output = result.outputs[i];
+        if (!output) return { error: "The local model returned no answer for this item." };
+        if ("error" in output) return { error: output.error };
+        try {
+          return { json: this.parseGenerated(output, contextSize, implicitMaxTokens != null) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      });
+      return {
+        answers,
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.reuse ? { reuse: result.reuse } : {}),
+      };
     } finally {
       await session.dispose().catch(() => undefined);
     }
@@ -652,7 +760,7 @@ function lettersFor(question: DecideQuestion): string[] {
  * Restating the schema is the same fix the Claude CLI provider and the
  * OpenAI json_object fallback already use.
  */
-function systemPromptFor(req: CompleteJSONRequest): string {
+function systemPromptFor(req: { system: string; schema: Record<string, unknown> }): string {
   return `${req.system}\n\nRespond with ONLY a JSON object conforming to this JSON Schema:\n${JSON.stringify(
     req.schema,
   )}`;

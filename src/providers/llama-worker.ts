@@ -13,13 +13,15 @@
  * Types are erased, so `import type` from siblings is fine.
  */
 import { totalmem } from "node:os";
-import type { ChatWrapper, Token } from "node-llama-cpp";
+import type { ChatWrapper, LlamaGrammar, Token } from "node-llama-cpp";
 import type {
   LlamaDecideOptions,
   LlamaDecideResult,
   LlamaDecideReuse,
   LlamaPromptOptions,
   LlamaPromptResult,
+  LlamaSharedOptions,
+  LlamaSharedResult,
 } from "./llama-cpp.js";
 
 /** A llama.cpp backend, as node-llama-cpp names it; `false` is the CPU. */
@@ -57,11 +59,15 @@ export interface WorkerSession {
 }
 
 /**
- * The parts of a context sequence a decision uses: node-llama-cpp's, or the
- * test suite's stand-in. Tokens are plain numbers here.
+ * The parts of a context sequence a decision or a shared-prefix completion
+ * uses: node-llama-cpp's, or the test suite's stand-in. Tokens are plain
+ * numbers here.
  */
 export interface DecideSequence {
-  /** The whole chat for one prompt, ending inside the opened answer, as tokens. */
+  /**
+   * The whole chat for one prompt, with thinking off, ending inside the opened
+   * answer (after `answerPrefix`, which may be empty), as tokens.
+   */
   render(user: string, answerPrefix: string): number[];
   /** Every single token that spells `label` as the next token, with or without a leading space. */
   labelTokens(label: string): number[];
@@ -77,34 +83,39 @@ export interface DecideSequence {
   probe(tokens: number[]): Promise<Map<number, number>>;
   /** Remove tokens `[start, end)`, restoring or re-evaluating what remains as needed. */
   erase(start: number, end: number): Promise<void>;
+  /**
+   * Evaluate `tokens`, then yield each token generated under the schema's
+   * grammar, ending before an end-of-generation token. A yielded token is in
+   * the context once the next one is asked for.
+   */
+  generate(
+    tokens: number[],
+    options: { schema: Record<string, unknown>; temperature: number },
+  ): AsyncIterable<number>;
+  detokenize(tokens: number[]): string;
 }
 
 /**
- * Answer a decision on one session. Every prompt is rendered whole, and the
- * tokens all prompts share are evaluated once. Each question then evaluates
- * only its own tail, reads the next-token probability of its labels, and is
- * erased back to the shared start for the next. ADR 01016.
+ * Evaluate the tokens every prompt shares once, then run `each` on each
+ * prompt's own tail, erasing back to the shared start between prompts.
+ * ADR 01016; completions reuse it (ADR 01018).
  *
  * Whether the erase kept the shared start is read from the token meter, not
  * assumed: a model that cannot erase and has no usable checkpoint makes
  * node-llama-cpp evaluate the start again, and that shows as input tokens.
  */
-export async function decideOn(
-  session: WorkerSession,
-  options: LlamaDecideOptions,
-): Promise<LlamaDecideResult> {
-  const sequence = session.sequence;
-  if (!sequence) {
-    throw new Error("This local-model session has no context sequence to decide on.");
-  }
-  const rendered = options.prompts.map((p) => sequence.render(p, options.answerPrefix));
+async function onSharedStart<T>(
+  sequence: DecideSequence,
+  rendered: number[][],
+  each: (tail: number[], i: number) => Promise<T>,
+): Promise<{ results: T[]; inputTokens: number; reuse?: LlamaDecideReuse }> {
   const shared = sharedPrefixLength(rendered);
   const start = sequence.inputTokens();
   if (shared > 0) await sequence.evaluate(rendered[0]!.slice(0, shared));
   if (sequence.needsCheckpoints) await sequence.takeCheckpoint();
 
   let reuse: LlamaDecideReuse | undefined;
-  const weights: Record<string, number>[] = [];
+  const results: T[] = [];
   for (const [i, tokens] of rendered.entries()) {
     if (i > 0) {
       const before = sequence.inputTokens();
@@ -112,10 +123,41 @@ export async function decideOn(
       if (sequence.inputTokens() > before) reuse = "reevaluate";
       else reuse ??= sequence.needsCheckpoints ? "checkpoint" : "erase";
     }
-    const next = await sequence.probe(tokens.slice(shared));
-    const labels = options.labels[i] ?? [];
-    weights.push(
-      Object.fromEntries(
+    results.push(await each(tokens.slice(shared), i));
+  }
+  return {
+    results,
+    inputTokens: sequence.inputTokens() - start,
+    ...(reuse ? { reuse } : {}),
+  };
+}
+
+function sequenceOf(session: WorkerSession): DecideSequence {
+  if (!session.sequence) {
+    throw new Error("This local-model session has no context sequence to decide on.");
+  }
+  return session.sequence;
+}
+
+/**
+ * Answer a decision on one session. Every prompt is rendered whole, and the
+ * tokens all prompts share are evaluated once. Each question then evaluates
+ * only its own tail, reads the next-token probability of its labels, and is
+ * erased back to the shared start for the next. ADR 01016.
+ */
+export async function decideOn(
+  session: WorkerSession,
+  options: LlamaDecideOptions,
+): Promise<LlamaDecideResult> {
+  const sequence = sequenceOf(session);
+  const rendered = options.prompts.map((p) => sequence.render(p, options.answerPrefix));
+  const { results, inputTokens, reuse } = await onSharedStart(
+    sequence,
+    rendered,
+    async (tail, i) => {
+      const next = await sequence.probe(tail);
+      const labels = options.labels[i] ?? [];
+      return Object.fromEntries(
         labels.map((label) => {
           const ids = new Set(sequence.labelTokens(label));
           if (ids.size === 0) {
@@ -125,14 +167,83 @@ export async function decideOn(
           }
           return [label, [...ids].reduce((sum, id) => sum + (next.get(id) ?? 0), 0)];
         }),
-      ),
-    );
-  }
+      );
+    },
+  );
   return {
-    weights,
-    usage: { inputTokens: sequence.inputTokens() - start, outputTokens: 0 },
+    weights: results,
+    usage: { inputTokens, outputTokens: 0 },
     ...(reuse ? { reuse } : {}),
   };
+}
+
+/**
+ * Generate one JSON answer per prompt on one session, the shared start
+ * evaluated once as for a decision. Each answer is generated under the
+ * schema's grammar until the value is complete, the model ends it, or
+ * `maxTokens` cuts it off. A failure is that prompt's alone: it is recorded,
+ * and the next prompt starts from the shared start as usual. ADR 01018.
+ */
+export async function completeSharedOn(
+  session: WorkerSession,
+  options: LlamaSharedOptions,
+): Promise<LlamaSharedResult> {
+  const sequence = sequenceOf(session);
+  const rendered = options.prompts.map((p) => sequence.render(p, ""));
+  let outputTokens = 0;
+  const { results, inputTokens, reuse } = await onSharedStart(
+    sequence,
+    rendered,
+    async (tail) => {
+      const generated: number[] = [];
+      try {
+        let text = "";
+        let stopReason = "eogToken";
+        for await (const token of sequence.generate(tail, options)) {
+          generated.push(token);
+          text = sequence.detokenize(generated);
+          // The grammar still allows trailing whitespace; the value is done.
+          if (isCompleteJson(text)) {
+            stopReason = "complete";
+            break;
+          }
+          if (options.maxTokens != null && generated.length >= options.maxTokens) {
+            stopReason = "maxTokens";
+            break;
+          }
+        }
+        return { text, stopReason };
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+      } finally {
+        outputTokens += generated.length;
+      }
+    },
+  );
+  return {
+    outputs: results,
+    usage: { inputTokens, outputTokens },
+    ...(reuse ? { reuse } : {}),
+  };
+}
+
+/**
+ * Whether `text` is a whole JSON object or array, counting the opening brace
+ * a grammar can leave off (ADR 01010), which the provider restores. Only text
+ * that ends in a closer is tried: no proper prefix of an object parses.
+ */
+function isCompleteJson(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.endsWith("}") && !trimmed.endsWith("]")) return false;
+  for (const candidate of [trimmed, `{${trimmed}`]) {
+    try {
+      JSON.parse(candidate);
+      return true;
+    } catch {
+      // Not this spelling.
+    }
+  }
+  return false;
 }
 
 /** Tokens every prompt starts with, leaving each at least one of its own. */
@@ -195,7 +306,8 @@ async function nodeLlamaCppBackend(
   options: WorkerBackendOptions,
   hooks: WorkerBackendHooks,
 ): Promise<WorkerBackend> {
-  const { getLlama, getLlamaGpuTypes, LlamaChatSession, TokenMeter } = mod;
+  const { getLlama, getLlamaGpuTypes, LlamaChatSession, LlamaGrammarEvaluationState, TokenMeter } =
+    mod;
   const { Gemma4ChatWrapper, QwenChatWrapper } = mod;
 
   /**
@@ -276,6 +388,7 @@ async function nodeLlamaCppBackend(
             systemPrompt,
           });
           const chat = withoutThinking(session.chatWrapper);
+          const grammars = new WeakMap<object, LlamaGrammar>();
           return {
             contextSize: context.contextSize,
             sequence: {
@@ -291,10 +404,28 @@ async function nodeLlamaCppBackend(
                   chatHistory: [
                     { type: "system", text: systemPrompt },
                     { type: "user", text: user },
-                    { type: "model", response: [answerPrefix] },
+                    { type: "model", response: answerPrefix ? [answerPrefix] : [] },
                   ],
                 });
                 return contextText.tokenize(model.tokenizer);
+              },
+              detokenize: (tokens) => model.detokenize(tokens as Token[]),
+              async *generate(tokens, generateOptions) {
+                // One grammar per schema object: every item of a request
+                // shares it, and each gets an evaluation state of its own.
+                let grammar = grammars.get(generateOptions.schema);
+                if (!grammar) {
+                  grammar = await llama.createGrammarForJsonSchema(
+                    generateOptions.schema as Parameters<
+                      typeof llama.createGrammarForJsonSchema
+                    >[0],
+                  );
+                  grammars.set(generateOptions.schema, grammar);
+                }
+                yield* sequence.evaluate(tokens as Token[], {
+                  temperature: generateOptions.temperature,
+                  grammarEvaluationState: new LlamaGrammarEvaluationState({ model, grammar }),
+                });
               },
               labelTokens: (label) =>
                 [
@@ -367,6 +498,7 @@ export type WorkerRequest = { id: number } & (
   | { op: "createSession"; modelId: number; systemPrompt: string; contextSize?: number }
   | { op: "prompt"; sessionId: number; text: string; options: LlamaPromptOptions }
   | { op: "decide"; sessionId: number; options: LlamaDecideOptions }
+  | { op: "completeShared"; sessionId: number; options: LlamaSharedOptions }
   | { op: "disposeSession"; sessionId: number }
   | { op: "disposeModel"; modelId: number }
   | { op: "shutdown" }
@@ -443,6 +575,8 @@ function serve(): void {
         return session(request.sessionId).prompt(request.text, request.options);
       case "decide":
         return decideOn(session(request.sessionId), request.options);
+      case "completeShared":
+        return completeSharedOn(session(request.sessionId), request.options);
       case "disposeSession": {
         const found = sessions.get(request.sessionId);
         sessions.delete(request.sessionId);

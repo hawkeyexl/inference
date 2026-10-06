@@ -187,6 +187,7 @@ interface LlamaLoadedModel {
 interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
   decide?(options: LlamaDecideOptions): Promise<LlamaDecideResult>;   // for decide()
+  completeShared?(options: LlamaSharedOptions): Promise<LlamaSharedResult>;   // for completeJSONShared
   dispose(): Promise<void>;
   readonly contextSize?: number;   // tokens of context actually created
 }
@@ -204,6 +205,19 @@ interface LlamaDecideResult {
 }
 
 type LlamaDecideReuse = "erase" | "checkpoint" | "reevaluate";
+
+interface LlamaSharedOptions {
+  prompts: string[];                  // one whole user turn per item
+  schema: Record<string, unknown>;    // each answer is generated under its grammar
+  temperature: number;
+  maxTokens?: number;                 // per item
+}
+
+interface LlamaSharedResult {
+  outputs: ({ text: string; stopReason?: string } | { error: string })[];   // per prompt
+  usage?: TokenUsage;
+  reuse?: LlamaDecideReuse;           // absent for a single item
+}
 
 interface LlamaPromptOptions {
   schema: Record<string, unknown>;
@@ -247,6 +261,8 @@ because its tokenizer lives in the worker.
 ```ts
 class LlamaCppProvider implements DecisionProvider {
   constructor(model: string, options?: LlamaCppProviderOptions);
+  // The native path completeJSONShared takes; call completeJSONShared, which validates.
+  completeJSONShared(req: SharedJSONRequest): Promise<SharedJSONResponse>;
 }
 
 interface LlamaCppProviderOptions {
@@ -348,6 +364,41 @@ request within it is never refused. A question has at most 26 options.
 On an RTX 4090 with CUDA, a three-question decision on `qwen3.5-4b` takes about 160 ms a question
 once the weights are loaded. On the CPU it takes about 11 s a question.
 [ADR 01016](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01016-decide-on-local-models-from-letter-probabilities.md)
+records the design.
+
+### Shared-prefix completions
+
+[`completeJSONShared`](/inference/reference/completion/#completejsonshared) runs every item on one
+session, the way `decide()` runs every question. The system prompt is yours with the schema
+restated, as for `completeJSON`. Each item's user turn is `shared + item`, rendered whole in the
+model's chat template with thinking off, as for decisions. The tokens every item's turn shares are
+evaluated once.
+
+Each item then evaluates only its own tail and generates its answer under the schema's grammar. Generation
+stops when the JSON value is complete, when the model ends its turn, or at the item's token limit.
+The session then returns to the end of the shared tokens, and reports how as `reuse`, with the
+values in the table above. Unlike a decision, `reuse` is on the response, `SharedJSONResponse.reuse`.
+
+The context is sized by the same rule as `completeJSON`, with the longest item's turn as the user
+prompt. It holds one item at a time, so 30 items need no more context than the longest one. With
+`maxTokens` unset, each item may use the room its context has left. `thoughtTokens` does not apply,
+because thinking is off.
+
+An item whose answer is cut off, does not parse, or fails the schema is `{ error }`, and the next
+item runs as usual. A failed answer is not retried here: at temperature 0 the same prefix
+generates the same tokens. A worker crash retries the whole request on the next backend, as for a
+prompt. Through the [model host](#the-model-host) the request is one job in the model's queue.
+
+On an RTX 4090 with CUDA, 30 rules over a turn of about 3700 tokens, with a three-integer schema:
+
+| Model | `reuse` | 30 items | Per item | One item alone |
+|---|---|---|---|---|
+| `qwen3.5-4b` | `checkpoint` | 7.0 s | about 230 ms | about 730 ms |
+| `granite-4.1-3b-q2` | `erase` | 3.6 s | about 120 ms | about 800 ms |
+
+The last column is what each item costs when the turn is evaluated for it alone, which is what 30
+independent `completeJSON` calls pay.
+[ADR 01018](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01018-structured-answers-over-a-shared-prefix.md)
 records the design.
 
 ## The worker process and the backend

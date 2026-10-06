@@ -10,7 +10,7 @@
  * machine without the binding.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import type { MockInstance } from "vitest";
 import {
   InferenceError,
   LlamaCppProvider,
+  completeJSONShared,
   completeValidatedJSON,
   defaultLlamaRuntime,
   disposeLlamaModels,
@@ -29,6 +30,7 @@ import type {
   DecideRequest,
   LlamaDecideResult,
   LlamaRuntime,
+  LlamaSharedResult,
 } from "../../src/index.js";
 import {
   llamaWorkerPids,
@@ -71,7 +73,7 @@ function configure(config: Record<string, unknown>): void {
 }
 
 /** The fixture's log, as `[event, backend, pid]` triples. */
-function events(kind: "init" | "prompt" | "decide"): { backend: string; pid: number }[] {
+function events(kind: "init" | "prompt" | "decide" | "prefix" | "generate"): { backend: string; pid: number }[] {
   let text = "";
   try {
     text = readFileSync(log, "utf8");
@@ -456,6 +458,198 @@ describe("decisions in the worker", () => {
     const { response } = await decide();
     expect(response.answers["tests"]!.choice).toBe("no");
     expect(events("decide").map((e) => e.backend)).toEqual(["cuda", "vulkan", "vulkan", "vulkan"]);
+    expect(warnings()).toHaveLength(1);
+  });
+});
+
+const TURN = "The agent ran `git commit --no-verify`, then wrote a summary without hedges.\n\n";
+const VERDICT_SCHEMA = {
+  type: "object",
+  properties: {
+    followed: { type: "integer", minimum: 0, maximum: 100 },
+    "not-followed": { type: "integer", minimum: 0, maximum: 100 },
+    "not-applicable": { type: "integer", minimum: 0, maximum: 100 },
+  },
+  required: ["followed", "not-followed", "not-applicable"],
+  additionalProperties: false,
+};
+const RULES = [
+  "Rule: never skip git hooks.",
+  "Rule: run the tests before committing.",
+  "Rule: word summaries plainly.",
+  "Rule: answer in French.",
+];
+const verdict = (followed: number, not: number, na: number): string =>
+  JSON.stringify({ followed, "not-followed": not, "not-applicable": na });
+
+/**
+ * The fixture's scripted generations, keyed by text only that rule holds. The
+ * fixture refuses a context holding two rules at once, so a missed erase fails.
+ */
+function configureShared(
+  sequence: string,
+  outputs: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): void {
+  configure({
+    sequence,
+    shared: {
+      outputs: {
+        "skip git hooks": verdict(5, 90, 5),
+        "run the tests": verdict(10, 20, 70),
+        "summaries plainly": verdict(85, 10, 5),
+        "in French": verdict(0, 95, 5),
+        ...outputs,
+      },
+    },
+    ...extra,
+  });
+}
+
+/** The real runtime, recording what each session's completeShared() reported. */
+function recordingShared(): { runtime: LlamaRuntime; results: LlamaSharedResult[] } {
+  const results: LlamaSharedResult[] = [];
+  const real = defaultLlamaRuntime();
+  return {
+    results,
+    runtime: {
+      ...real,
+      async loadModel(path) {
+        const model = await real.loadModel(path);
+        return {
+          ...model,
+          async createSession(systemPrompt, contextSize) {
+            const session = await model.createSession(systemPrompt, contextSize);
+            return {
+              ...session,
+              async completeShared(options) {
+                const result = await session.completeShared!(options);
+                results.push(result);
+                return result;
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+}
+
+// Each test forks a fresh worker, twice for the re-evaluation case: generous for slow runners.
+describe("shared-prefix JSON in the worker", { timeout: 60_000 }, () => {
+  async function shared(
+    items: string[] = RULES,
+    options: ConstructorParameters<typeof LlamaCppProvider>[1] = {},
+  ) {
+    await disposeLlamaModels();
+    const { runtime, results } = recordingShared();
+    const response = await completeJSONShared(provider({ runtime, ...options }), {
+      system: "You judge one agent turn against one rule.",
+      shared: TURN,
+      items,
+      schema: VERDICT_SCHEMA,
+    });
+    return { response, result: results[0] };
+  }
+
+  it("answers each item with its own validated object, in item order", async () => {
+    configureShared("attention");
+    const { response } = await shared();
+    expect(response.answers).toEqual([
+      { json: { followed: 5, "not-followed": 90, "not-applicable": 5 } },
+      { json: { followed: 10, "not-followed": 20, "not-applicable": 70 } },
+      { json: { followed: 85, "not-followed": 10, "not-applicable": 5 } },
+      { json: { followed: 0, "not-followed": 95, "not-applicable": 5 } },
+    ]);
+    expect(response.usage?.inputTokens).toBeGreaterThan(0);
+    expect(response.usage?.outputTokens).toBeGreaterThan(0);
+    expect(events("generate")).toHaveLength(RULES.length);
+  });
+
+  it.each([
+    ["attention", "erase"],
+    ["hybrid", "checkpoint"],
+  ])("evaluates the shared prefix once on a %s sequence, reusing it by %s", async (sequence, reuse) => {
+    configureShared(sequence);
+    const { response, result } = await shared();
+    expect(events("prefix")).toHaveLength(1);
+    expect(response.reuse).toBe(reuse);
+    expect(result?.reuse).toBe(reuse);
+  });
+
+  it("re-evaluates the prefix per item when the sequence cannot be restored, with the same answers", async () => {
+    configureShared("attention");
+    const erased = await shared();
+    rmSync(log, { force: true });
+    configureShared("hybrid-without-checkpoints");
+    const again = await shared();
+    expect(again.response.reuse).toBe("reevaluate");
+    expect(events("prefix")).toHaveLength(RULES.length);
+    expect(again.response.answers).toEqual(erased.response.answers);
+    expect(again.response.usage!.inputTokens).toBeGreaterThan(
+      erased.response.usage!.inputTokens + (RULES.length - 1) * TURN.length,
+    );
+  });
+
+  it("reports no reuse for a single item", async () => {
+    configureShared("hybrid");
+    const { response } = await shared([RULES[0]!]);
+    expect(response.reuse).toBeUndefined();
+    expect(response.answers).toEqual([
+      { json: { followed: 5, "not-followed": 90, "not-applicable": 5 } },
+    ]);
+  });
+
+  it("stops generating once the object is complete", async () => {
+    configureShared("attention", {
+      "skip git hooks": `${verdict(5, 90, 5)}\n\n\n\ntrailing text`,
+    });
+    const { response } = await shared();
+    expect(response.answers[0]).toEqual({
+      json: { followed: 5, "not-followed": 90, "not-applicable": 5 },
+    });
+  });
+
+  it("records a failed item as an error and answers the rest", async () => {
+    configureShared("hybrid", {
+      "skip git hooks": `{"followed": 5, "not-followed": 900, "not-applicable": 5}`,
+      "run the tests": "not json at all",
+      "summaries plainly": { throw: "grammar evaluation failed" },
+    });
+    const { response } = await shared();
+    expect(response.answers[0]).toEqual({
+      error: expect.stringMatching(
+        /^Response failed schema validation: \/not-followed must be <= 100/,
+      ) as unknown,
+    });
+    expect(response.answers[1]).toEqual({ error: expect.stringMatching(/JSON/) as unknown });
+    expect(response.answers[2]).toEqual({ error: "grammar evaluation failed" });
+    expect(response.answers[3]).toEqual({
+      json: { followed: 0, "not-followed": 95, "not-applicable": 5 },
+    });
+    expect(response.reuse).toBe("checkpoint");
+  });
+
+  it("records an item cut off at maxTokens as an error", async () => {
+    configureShared("attention");
+    const { response } = await shared(RULES, { maxTokens: 20 });
+    for (const answer of response.answers) {
+      expect(answer).toEqual({
+        error: expect.stringMatching(
+          /hit the token limit before completing the JSON \(maxTokens: 20\)/,
+        ) as unknown,
+      });
+    }
+  });
+
+  it("falls back from a backend that crashes mid-generation, starting over", async () => {
+    configureShared("hybrid", {}, { abort: { cuda: "generate" } });
+    const { response } = await shared();
+    expect(response.answers.every((a) => "json" in a)).toBe(true);
+    expect(events("generate").map((e) => e.backend)).toEqual([
+      "cuda",
+      ...RULES.map(() => "vulkan"),
+    ]);
     expect(warnings()).toHaveLength(1);
   });
 });

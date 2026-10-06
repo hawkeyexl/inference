@@ -382,9 +382,25 @@ runtime has it.
 
 **Fix:** add `decide` to your fake's sessions, or leave `runtime` unset.
 
+### `This llama-cpp runtime's sessions have no completeShared(), so the provider cannot answer over a shared prefix.`
+
+A `LlamaRuntime` you injected opens sessions without the optional `completeShared` method, which
+`completeJSONShared` uses on the local provider. The default runtime has it.
+
+**Fix:** add `completeShared` to your fake's sessions, or leave `runtime` unset.
+
+### `completeJSONShared concurrency must be a positive integer, got <X>.`
+
+`concurrency` bounds the calls in flight on a provider without a native shared-prefix path. It was
+0, negative, fractional or not a number. See
+[`completeJSONShared`](/inference/reference/completion/#completejsonshared).
+
+**Fix:** pass a positive integer, or leave it unset for 8.
+
 ## Model failures — recorded on `run.error`
 
-None of these throw. Each arrives with `result` (or `verdict`) absent.
+None of these throw. Each arrives with `result` (or `verdict`) absent. `completeJSONShared` records
+the same messages on each failed item's `error`, in that item's place in `answers`.
 
 ### `Response failed schema validation: <path> <message>; …`
 
@@ -393,6 +409,13 @@ Ajv rejected the response on the final attempt. One clause per validation error,
 **Fix:** usually the schema, not the model. Check the shape is expressible — and if you are on a
 local model, that you are not relying on `required` or numeric bounds, which
 [a grammar does not enforce](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+
+### `The local model returned no answer for this item.`
+
+Recorded by `completeJSONShared` on the local provider when its session returned fewer outputs than
+items. The default runtime always returns one per item; an injected `LlamaRuntime` may not.
+
+**Fix:** have your fake's `completeShared` return one entry in `outputs` per prompt.
 
 ### `Response contained no parseable JSON object`
 

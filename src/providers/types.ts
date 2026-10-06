@@ -60,3 +60,45 @@ export interface ExecOptions {
 
 /** Injectable process-execution seam — subprocess providers take one for tests. */
 export type ExecFn = (cmd: string[], opts?: ExecOptions) => Promise<ExecResult>;
+
+/**
+ * N answers that share one long prefix (ADR 01018): the user turn of item i
+ * is `shared + items[i]`, verbatim, and each answer must satisfy `schema`.
+ */
+export interface SharedJSONRequest {
+  system: string;
+  /** The long part every item shares. It comes first in the user turn. */
+  shared: string;
+  /** Each item's own tail, appended to `shared` as it is. */
+  items: string[];
+  /** JSON Schema every answer must conform to. */
+  schema: Record<string, unknown>;
+  /** Default 0. */
+  temperature?: number;
+  /** Calls in flight at once on a provider without a native path. Default 8. */
+  concurrency?: number;
+}
+
+/** One item's answer: schema-valid JSON, or why there is none. */
+export type SharedJSONAnswer = { json: unknown } | { error: string };
+
+export interface SharedJSONResponse {
+  /** One per item, in item order. A failed item is an `error`, never dropped. */
+  answers: SharedJSONAnswer[];
+  /** Summed over the items that report it; absent when none does. */
+  usage?: TokenUsage;
+  /**
+   * How a local model got back to the shared prefix between items: `"erase"`,
+   * `"checkpoint"`, or `"reevaluate"` when it evaluated the prefix again.
+   * Absent for a single item, and on providers without a native path.
+   */
+  reuse?: "erase" | "checkpoint" | "reevaluate";
+}
+
+/**
+ * A provider that answers a shared-prefix request natively. Internal: callers
+ * use `completeJSONShared`, which falls back for every other provider.
+ */
+export interface SharedJSONProvider extends InferenceProvider {
+  completeJSONShared(req: SharedJSONRequest): Promise<SharedJSONResponse>;
+}

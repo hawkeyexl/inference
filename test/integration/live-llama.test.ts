@@ -22,6 +22,7 @@ import {
   LlamaCppProvider,
   aliasForTier,
   canDecide,
+  completeJSONShared,
   costOfRuns,
   defaultLlamaModelsDirectory,
   defaultLlamaRuntime,
@@ -304,6 +305,105 @@ live("live llama-cpp provider", () => {
       expect(limit).toBeGreaterThan(8192);
       // Qwen3.5 and Granite 4.1 train on 262144 and 131072 tokens.
       expect(limit).toBeLessThan(262_144);
+    }, TIMEOUT);
+  });
+
+  // One long turn judged against many rules, the shape manni's tracevals sends.
+  // INFERENCE_LIVE_SHARED_MODEL picks the model; it defaults to qwen3.5-4b.
+  describe("completeJSONShared, against the real binding", () => {
+    const model = process.env["INFERENCE_LIVE_SHARED_MODEL"] ?? "qwen3.5-4b";
+    const schema = {
+      type: "object",
+      properties: {
+        followed: { type: "integer", minimum: 0, maximum: 100 },
+        "not-followed": { type: "integer", minimum: 0, maximum: 100 },
+        "not-applicable": { type: "integer", minimum: 0, maximum: 100 },
+      },
+      required: ["followed", "not-followed", "not-applicable"],
+      additionalProperties: false,
+    };
+    const system =
+      "You judge one turn of a coding agent against one rule. Give each outcome a score " +
+      "from 0 to 100 for how likely it is: the agent followed the rule, did not follow it, " +
+      "or the rule does not apply to this turn.";
+    // About 3000 tokens of tool calls and their output, then the one violation.
+    const steps = Array.from(
+      { length: 56 },
+      (_, i) =>
+        `Step ${i + 1}: the agent ran \`npm test -- --run test/unit/part-${i}.test.ts\` ` +
+        `and read the output: ${i + 3} tests passed in ${(i % 7) + 1}.${i % 10} s, none failed. ` +
+        `It then opened src/part-${i}.ts and changed the error message on line ${i * 3 + 10}.`,
+    );
+    const shared =
+      `# Turn\n\n${steps.join("\n")}\n` +
+      "Then the agent ran `git commit --no-verify -m \"fix messages\"`, which skips " +
+      "the repository's pre-commit hook.\nLast, it replied to the user in English.\n\n# Rule\n\n";
+    const filler = [
+      "Use tabs for indentation in Makefiles.",
+      "Prefix every commit message with a ticket number.",
+      "Never edit files under vendor/.",
+      "Write commit messages in the imperative mood.",
+      "Keep functions under fifty lines.",
+      "Do not add new dependencies without asking.",
+      "Use single quotes in Python code.",
+      "Name test files after the module they test.",
+      "Never print secrets to the terminal.",
+      "Prefer async/await over raw promises.",
+      "Document every exported function.",
+      "Run the formatter before committing.",
+      "Avoid force-pushing to shared branches.",
+      "Keep pull requests under 400 lines.",
+      "Use UTC for every stored timestamp.",
+      "Do not commit generated files.",
+      "Pin Docker base images by digest.",
+      "Ask before deleting any file.",
+      "Use semantic versioning for releases.",
+      "Write tests before the implementation.",
+      "Do not use em dashes in documentation.",
+      "Keep the changelog up to date.",
+      "Log errors with their stack traces.",
+      "Use the repository's lint configuration.",
+      "Never disable type checking for a file.",
+      "Prefer composition over inheritance.",
+      "Run database migrations in a transaction.",
+    ];
+    const items = [
+      "Never skip git hooks: no --no-verify.",
+      "Reply to the user in English.",
+      "Run the tests before changing code.",
+      ...filler,
+    ];
+
+    it("answers ~30 rules over one ~3k-token turn, evaluating the turn once", async () => {
+      await disposeLlamaModels();
+      const provider = new LlamaCppProvider(model);
+      const request = { system, shared, items, schema };
+      // Loads the weights; not timed.
+      await completeJSONShared(provider, { ...request, items: items.slice(0, 2) });
+      const started = performance.now();
+      const response = await completeJSONShared(provider, request);
+      const elapsed = performance.now() - started;
+      const one = performance.now();
+      const alone = await completeJSONShared(provider, { ...request, items: [items[0]!] });
+      const single = performance.now() - one;
+      const sharedTokens = Math.round(shared.length / 4);
+      console.log(
+        `completeJSONShared on ${model}: ${items.length} items over ~${sharedTokens} tokens ` +
+          `in ${elapsed.toFixed(0)} ms (${(elapsed / items.length).toFixed(0)} ms each), ` +
+          `reuse ${String(response.reuse)}, ${String(response.usage?.inputTokens)} input + ` +
+          `${String(response.usage?.outputTokens)} output tokens; one item alone ${single.toFixed(0)} ms ` +
+          `for ${String(alone.usage?.inputTokens)} input tokens`,
+      );
+      console.log(JSON.stringify(response.answers.slice(0, 3)));
+
+      expect(response.answers).toHaveLength(items.length);
+      const errors = response.answers.flatMap((a) => ("error" in a ? [a.error] : []));
+      expect(errors).toEqual([]);
+      expect(["erase", "checkpoint"]).toContain(response.reuse);
+      // The turn was evaluated once, not once per item.
+      expect(response.usage!.inputTokens).toBeLessThan(sharedTokens * 3);
+      const hooks = (response.answers[0] as { json: Record<string, number> }).json;
+      expect(hooks["not-followed"]).toBeGreaterThan(hooks["followed"]!);
     }, TIMEOUT);
   });
 

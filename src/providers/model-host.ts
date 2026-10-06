@@ -27,7 +27,7 @@ import { defaultLlamaModelsDirectory } from "./llama-models.js";
 import { defaultLlamaRuntimeDirectory } from "./llama-install.js";
 import type { DecideRequest } from "./decide.js";
 import type { LlamaGpu } from "./llama-host.js";
-import type { CompleteJSONRequest } from "./types.js";
+import type { CompleteJSONRequest, SharedJSONRequest } from "./types.js";
 
 /**
  * Where a `llama-cpp` provider runs its calls. `"off"`: in this process's own
@@ -122,6 +122,7 @@ export type HostFrame =
   | { op: "hello"; token: string }
   | ({ op: "completeJSON"; model: HostedModel; request: CompleteJSONRequest } & HostedCall)
   | ({ op: "decide"; model: HostedModel; request: DecideRequest } & HostedCall)
+  | ({ op: "completeJSONShared"; model: HostedModel; request: SharedJSONRequest } & HostedCall)
   | ({ op: "stateLimit"; model: HostedModel } & HostedCall)
   | ({ op: "lease"; model: HostedModel; session: string } & HostedCall)
   | { op: "release"; session: string }
@@ -347,6 +348,7 @@ export async function callModelHost<T>(
   call:
     | { op: "completeJSON"; request: CompleteJSONRequest }
     | { op: "decide"; request: DecideRequest }
+    | { op: "completeJSONShared"; request: SharedJSONRequest }
     | { op: "stateLimit" },
   local: () => Promise<T>,
 ): Promise<T> {

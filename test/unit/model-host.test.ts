@@ -22,6 +22,7 @@ import {
   InferenceError,
   LlamaCppProvider,
   ModelHostBusyError,
+  completeJSONShared,
   disposeLlamaModels,
   leaseModelHost,
   modelHostStatus,
@@ -394,6 +395,23 @@ describe("the model host", () => {
     });
     expect(result.answers["color"]?.choice).toBe("yes");
     expect(await p.stateLimit()).toBeGreaterThan(0);
+    expect(events("load")).toHaveLength(1);
+    expect(llamaWorkerPids()).toEqual([]);
+  }, TEST_TIMEOUT);
+
+  it("serves completeJSONShared through the host", async () => {
+    configure({
+      sequence: "hybrid",
+      shared: { outputs: { "rule one": `{"n": 1}`, "rule two": `{"n": 2}` } },
+    });
+    const response = await completeJSONShared(provider(), {
+      system: "You judge.",
+      shared: "A long agent turn.\n\n",
+      items: ["rule one", "rule two"],
+      schema: { type: "object", properties: { n: { type: "integer" } }, required: ["n"] },
+    });
+    expect(response.answers).toEqual([{ json: { n: 1 } }, { json: { n: 2 } }]);
+    expect(response.reuse).toBe("checkpoint");
     expect(events("load")).toHaveLength(1);
     expect(llamaWorkerPids()).toEqual([]);
   }, TEST_TIMEOUT);
