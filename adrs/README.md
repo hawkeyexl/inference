@@ -30,4 +30,4 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01016](01016-decide-on-local-models-from-letter-probabilities.md) | Decide on local models from the next-token probabilities of option letters, evaluating the shared state once |
 | [01017](01017-keep-local-models-loaded-in-a-model-host.md) | Keep local models loaded across processes in an opt-in model host |
 | [01018](01018-structured-answers-over-a-shared-prefix.md) | Answer many items with schema-valid JSON over one shared prefix, evaluating the prefix once on local models |
-| [01019](01019-cut-the-fixed-cost-of-a-local-call.md) | Cut the fixed cost of a local call |
+| [01019](01019-cut-the-fixed-cost-of-a-local-call.md) | Cut the fixed cost of a local call: read the top 40 tokens for a decision, and reuse one context |

@@ -24,13 +24,19 @@ import {
   isModuleNotFound,
   nodeLlamaCppShimUrl,
 } from "./llama-install.js";
-import { WORKER_ENV_FLAG, completeSharedOn, decideOn, openBackend } from "./llama-worker.js";
+import {
+  WORKER_ENV_FLAG,
+  completeSharedOn,
+  decideOn,
+  openBackend,
+  reusingContexts,
+} from "./llama-worker.js";
 import type {
+  PooledModel,
   WorkerBackend,
   WorkerBackendOptions,
   WorkerGpu,
   WorkerMessage,
-  WorkerModel,
   WorkerRequest,
 } from "./llama-worker.js";
 import type {
@@ -616,14 +622,32 @@ class WorkerModelProxy {
     return loaded;
   }
 
+  /** Texts asked to be counted in this tick, sent to the worker together. */
+  private counting: { texts: string[]; counts: Promise<number[]> } | undefined;
+
+  /**
+   * Every count asked for in one tick is one request to the worker: the
+   * provider counts a call's system prompt and every prompt at once, and a
+   * round trip each was about 30 ms of a 36-question decision. ADR 01019.
+   */
   countTokens(text: string): Promise<number> {
-    return this.slot.run(async (host) =>
-      host.request<number>({
-        op: "countTokens",
-        modelId: (await this.on(host)).modelId,
-        text,
-      }),
-    );
+    let batch = this.counting;
+    if (!batch) {
+      const texts: string[] = [];
+      const counts = Promise.resolve().then(() => {
+        this.counting = undefined;
+        return this.slot.run(async (host) =>
+          host.request<number[]>({
+            op: "countTokens",
+            modelId: (await this.on(host)).modelId,
+            texts,
+          }),
+        );
+      });
+      batch = this.counting = { texts, counts };
+    }
+    const i = batch.texts.push(text) - 1;
+    return batch.counts.then((counts) => counts[i]!);
   }
 
   async createSession(systemPrompt: string, contextSize?: number): Promise<LlamaSession> {
@@ -760,16 +784,17 @@ function inProcessRuntime(gpu: LlamaGpu): LlamaRuntime {
   return {
     resolveModelFile: (uri, directory) =>
       backendSource().then((source) => source.resolveModelFile(uri, directory)),
-    loadModel: (path) => backend().then(async (b) => deciding(await b.loadModel(path))),
+    loadModel: (path) =>
+      backend().then(async (b) => deciding(reusingContexts(await b.loadModel(path)))),
     getMemoryBudgetBytes: () => backend().then((b) => b.memoryBudget()),
   };
 }
 
 /** An in-process model whose sessions decide and complete here, as the worker's would there. */
-function deciding(model: WorkerModel): LlamaLoadedModel {
+function deciding(model: PooledModel): LlamaLoadedModel {
   return {
     trainContextSize: model.trainContextSize,
-    countTokens: (text) => model.countTokens(text),
+    countTokens: (text) => model.countTokens([text])[0]!,
     dispose: () => model.dispose(),
     async createSession(systemPrompt, contextSize) {
       const session = await model.createSession(systemPrompt, contextSize);

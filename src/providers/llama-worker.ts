@@ -282,11 +282,86 @@ function sharedPrefixLength(rendered: number[][]): number {
   return Math.max(0, length);
 }
 
+/** A context and its one sequence, which outlive the sessions opened on it. */
+export interface WorkerContext {
+  /** Tokens the backend actually created, which may round the request up. */
+  readonly contextSize?: number;
+  /** Empty the sequence: no tokens, no checkpoints. */
+  clear(): Promise<void>;
+  /** A session over the sequence. Disposing it leaves the context as it is. */
+  session(systemPrompt: string): WorkerSession;
+  dispose(): Promise<void>;
+}
+
 export interface WorkerModel {
   readonly trainContextSize?: number;
-  countTokens(text: string): number;
+  /** One count per text. */
+  countTokens(texts: string[]): number[];
+  createContext(contextSize: number): Promise<WorkerContext>;
+  dispose(): Promise<void>;
+}
+
+/** A model whose sessions reuse one idle context — see `reusingContexts`. */
+export interface PooledModel {
+  readonly trainContextSize?: number;
+  countTokens(texts: string[]): number[];
   createSession(systemPrompt: string, contextSize?: number): Promise<WorkerSession>;
   dispose(): Promise<void>;
+}
+
+/**
+ * Keep one idle context per model, and open the next session on it rather
+ * than on a new one: creating a context took about 200 ms of every call.
+ * ADR 01019.
+ *
+ * A session takes the idle context when it holds at least the size asked for
+ * and at most twice it, after emptying it. Otherwise a context of the size
+ * asked for is created, and the idle one is disposed. So memory stays within
+ * twice what a call needs (ADR 01011), and a call never gets less. When a
+ * session ends its context becomes the idle one, unless another already is;
+ * then it is disposed. A worker that crashes takes its contexts with it, and
+ * the replacement creates its own.
+ */
+export function reusingContexts(model: WorkerModel): PooledModel {
+  let idle: WorkerContext | undefined;
+  let disposed = false;
+  return {
+    trainContextSize: model.trainContextSize,
+    countTokens: (texts) => model.countTokens(texts),
+    async createSession(systemPrompt, contextSize = DEFAULT_CONTEXT_SIZE) {
+      let context = idle;
+      idle = undefined;
+      const size = context?.contextSize ?? contextSize;
+      if (context && size >= contextSize && size <= 2 * contextSize) {
+        await context.clear();
+      } else {
+        await context?.dispose();
+        context = await model.createContext(contextSize);
+      }
+      const held = context;
+      const session = held.session(systemPrompt);
+      let ended = false;
+      return {
+        contextSize: session.contextSize,
+        sequence: session.sequence,
+        prompt: (text, options) => session.prompt(text, options),
+        async dispose() {
+          if (ended) return;
+          ended = true;
+          await session.dispose();
+          if (!idle && !disposed) idle = held;
+          else await held.dispose();
+        },
+      };
+    },
+    async dispose() {
+      disposed = true;
+      const context = idle;
+      idle = undefined;
+      await context?.dispose();
+      await model.dispose();
+    },
+  };
 }
 
 export interface WorkerBackend {
@@ -396,116 +471,128 @@ async function nodeLlamaCppBackend(
 
     async loadModel(path) {
       const model = await llama.loadModel({ modelPath: path });
+      // Resolving the chat template took about 120 ms a session on Qwen3.5,
+      // and it is the model's, so it is resolved once.
+      let chatWrapper: ChatWrapper | undefined;
       return {
         trainContextSize: model.trainContextSize,
-        countTokens: (text) => model.tokenize(text).length,
-        async createSession(systemPrompt, contextSize) {
+        countTokens: (texts) => texts.map((text) => model.tokenize(text).length),
+        async createContext(contextSize) {
           // Always an explicit size. Left out, node-llama-cpp sizes the context
           // to free memory, which is the bug ADR 01011 records.
-          const context = await model.createContext({
-            contextSize: contextSize ?? DEFAULT_CONTEXT_SIZE,
-          });
+          const context = await model.createContext({ contextSize });
           const sequence = context.getSequence();
-          const session = new LlamaChatSession({
-            contextSequence: sequence,
-            systemPrompt,
-          });
-          const chat = withoutThinking(session.chatWrapper);
-          const grammars = new WeakMap<object, LlamaGrammar>();
           return {
             contextSize: context.contextSize,
-            sequence: {
-              get needsCheckpoints() {
-                return sequence.needsCheckpoints;
-              },
-              get nextTokenIndex() {
-                return sequence.nextTokenIndex;
-              },
-              inputTokens: () => sequence.tokenMeter.usedInputTokens,
-              render(user, answerPrefix) {
-                const { contextText } = chat.generateContextState({
-                  chatHistory: [
-                    { type: "system", text: systemPrompt },
-                    { type: "user", text: user },
-                    { type: "model", response: answerPrefix ? [answerPrefix] : [] },
-                  ],
-                });
-                return contextText.tokenize(model.tokenizer);
-              },
-              detokenize: (tokens) => model.detokenize(tokens as Token[]),
-              async *generate(tokens, generateOptions) {
-                // One grammar per schema object: every item of a request
-                // shares it, and each gets an evaluation state of its own.
-                let grammar = grammars.get(generateOptions.schema);
-                if (!grammar) {
-                  grammar = await llama.createGrammarForJsonSchema(
-                    generateOptions.schema as Parameters<
+            // Every token, and with them every checkpoint.
+            clear: () => sequence.clearHistory(),
+            dispose: () => context.dispose(),
+            session(systemPrompt) {
+              const session = new LlamaChatSession({
+                contextSequence: sequence,
+                systemPrompt,
+                ...(chatWrapper ? { chatWrapper } : {}),
+              });
+              chatWrapper ??= session.chatWrapper;
+              const chat = withoutThinking(session.chatWrapper);
+              const grammars = new WeakMap<object, LlamaGrammar>();
+              return {
+                contextSize: context.contextSize,
+                sequence: {
+                  get needsCheckpoints() {
+                    return sequence.needsCheckpoints;
+                  },
+                  get nextTokenIndex() {
+                    return sequence.nextTokenIndex;
+                  },
+                  inputTokens: () => sequence.tokenMeter.usedInputTokens,
+                  render(user, answerPrefix) {
+                    const { contextText } = chat.generateContextState({
+                      chatHistory: [
+                        { type: "system", text: systemPrompt },
+                        { type: "user", text: user },
+                        { type: "model", response: answerPrefix ? [answerPrefix] : [] },
+                      ],
+                    });
+                    return contextText.tokenize(model.tokenizer);
+                  },
+                  detokenize: (tokens) => model.detokenize(tokens as Token[]),
+                  async *generate(tokens, generateOptions) {
+                    // One grammar per schema object: every item of a request
+                    // shares it, and each gets an evaluation state of its own.
+                    let grammar = grammars.get(generateOptions.schema);
+                    if (!grammar) {
+                      grammar = await llama.createGrammarForJsonSchema(
+                        generateOptions.schema as Parameters<
+                          typeof llama.createGrammarForJsonSchema
+                        >[0],
+                      );
+                      grammars.set(generateOptions.schema, grammar);
+                    }
+                    yield* sequence.evaluate(tokens as Token[], {
+                      temperature: generateOptions.temperature,
+                      grammarEvaluationState: new LlamaGrammarEvaluationState({ model, grammar }),
+                    });
+                  },
+                  labelTokens: (label) =>
+                    [
+                      model.tokenize(label, false, "trimLeadingSpace"),
+                      model.tokenize(` ${label}`, false),
+                    ].flatMap((tokens) => (tokens.length === 1 ? tokens : [])),
+                  evaluate: (tokens) =>
+                    sequence.evaluateWithoutGeneratingNewTokens(tokens as Token[]),
+                  takeCheckpoint: () => sequence.takeCheckpoint(),
+                  erase: (start, end) => sequence.eraseContextTokenRanges([{ start, end }]),
+                  async probe(tokens, topK) {
+                    const last = tokens.length - 1;
+                    // Temperature 0 samples greedily, so its distribution is the
+                    // softmax over the whole vocabulary. With topK, temperature 1
+                    // keeps the softmax as it is, truncated to the topK most likely
+                    // tokens; topP 1 stops node-llama-cpp's default 0.95 from
+                    // cutting that short. Ratios between tokens are unchanged.
+                    const generateNext = {
+                      probabilities: true,
+                      ...(topK != null ? { options: { topK, topP: 1, minP: 0, temperature: 1 } } : {}),
+                    };
+                    const output = await sequence.controlledEvaluate(
+                      (tokens as Token[]).map((token, i) =>
+                        i === last ? [token, { generateNext }] : token,
+                      ),
+                    );
+                    return output[last]?.next.probabilities ?? new Map<number, number>();
+                  },
+                },
+                async prompt(text, promptOptions) {
+                  const grammar = await llama.createGrammarForJsonSchema(
+                    promptOptions.schema as Parameters<
                       typeof llama.createGrammarForJsonSchema
                     >[0],
                   );
-                  grammars.set(generateOptions.schema, grammar);
-                }
-                yield* sequence.evaluate(tokens as Token[], {
-                  temperature: generateOptions.temperature,
-                  grammarEvaluationState: new LlamaGrammarEvaluationState({ model, grammar }),
-                });
-              },
-              labelTokens: (label) =>
-                [
-                  model.tokenize(label, false, "trimLeadingSpace"),
-                  model.tokenize(` ${label}`, false),
-                ].flatMap((tokens) => (tokens.length === 1 ? tokens : [])),
-              evaluate: (tokens) =>
-                sequence.evaluateWithoutGeneratingNewTokens(tokens as Token[]),
-              takeCheckpoint: () => sequence.takeCheckpoint(),
-              erase: (start, end) => sequence.eraseContextTokenRanges([{ start, end }]),
-              async probe(tokens, topK) {
-                const last = tokens.length - 1;
-                // Temperature 0 samples greedily, so its distribution is the
-                // softmax over the whole vocabulary. With topK, temperature 1
-                // keeps the softmax as it is, truncated to the topK most likely
-                // tokens; topP 1 stops node-llama-cpp's default 0.95 from
-                // cutting that short. Ratios between tokens are unchanged.
-                const generateNext = {
-                  probabilities: true,
-                  ...(topK != null ? { options: { topK, topP: 1, minP: 0, temperature: 1 } } : {}),
-                };
-                const output = await sequence.controlledEvaluate(
-                  (tokens as Token[]).map((token, i) =>
-                    i === last ? [token, { generateNext }] : token,
-                  ),
-                );
-                return output[last]?.next.probabilities ?? new Map<number, number>();
-              },
-            },
-            async prompt(text, promptOptions) {
-              const grammar = await llama.createGrammarForJsonSchema(
-                promptOptions.schema as Parameters<
-                  typeof llama.createGrammarForJsonSchema
-                >[0],
-              );
-              const before = sequence.tokenMeter.getState();
-              const result = await session.promptWithMeta(text, {
-                grammar,
-                temperature: promptOptions.temperature,
-                budgets: { thoughtTokens: promptOptions.thoughtTokens },
-                ...(promptOptions.maxTokens != null
-                  ? { maxTokens: promptOptions.maxTokens }
-                  : {}),
-              });
-              // promptWithMeta does not report usage; the sequence's meter does.
-              const diff = TokenMeter.diff(sequence.tokenMeter, before);
-              return {
-                text: result.responseText,
-                stopReason: result.stopReason,
-                usage: {
-                  inputTokens: diff.usedInputTokens,
-                  outputTokens: diff.usedOutputTokens,
+                  const before = sequence.tokenMeter.getState();
+                  const result = await session.promptWithMeta(text, {
+                    grammar,
+                    temperature: promptOptions.temperature,
+                    budgets: { thoughtTokens: promptOptions.thoughtTokens },
+                    ...(promptOptions.maxTokens != null
+                      ? { maxTokens: promptOptions.maxTokens }
+                      : {}),
+                  });
+                  // promptWithMeta does not report usage; the sequence's meter does.
+                  const diff = TokenMeter.diff(sequence.tokenMeter, before);
+                  return {
+                    text: result.responseText,
+                    stopReason: result.stopReason,
+                    usage: {
+                      inputTokens: diff.usedInputTokens,
+                      outputTokens: diff.usedOutputTokens,
+                    },
+                  };
+                },
+                async dispose() {
+                  // The context and its sequence stay, for the next session.
+                  session.dispose({ disposeSequence: false });
                 },
               };
-            },
-            async dispose() {
-              await context.dispose();
             },
           };
         },
@@ -522,7 +609,7 @@ export type WorkerRequest = { id: number } & (
   | { op: "init"; moduleUrl: string; options: WorkerBackendOptions }
   | { op: "memoryBudget" }
   | { op: "loadModel"; path: string }
-  | { op: "countTokens"; modelId: number; text: string }
+  | { op: "countTokens"; modelId: number; texts: string[] }
   | { op: "createSession"; modelId: number; systemPrompt: string; contextSize?: number }
   | { op: "prompt"; sessionId: number; text: string; options: LlamaPromptOptions }
   | { op: "decide"; sessionId: number; options: LlamaDecideOptions }
@@ -544,7 +631,7 @@ function serve(): void {
   // Anything this worker spawns is not a worker.
   delete process.env[WORKER_ENV_FLAG];
   let backend: Promise<WorkerBackend> | undefined;
-  const models = new Map<number, WorkerModel>();
+  const models = new Map<number, PooledModel>();
   const sessions = new Map<number, WorkerSession>();
   let nextId = 1;
 
@@ -560,7 +647,7 @@ function serve(): void {
     if (!backend) throw new Error("The local-model worker was not initialised.");
     return backend;
   };
-  const model = (id: number): WorkerModel => {
+  const model = (id: number): PooledModel => {
     const found = models.get(id);
     if (!found) throw new Error(`The local-model worker has no model ${id}.`);
     return found;
@@ -583,13 +670,13 @@ function serve(): void {
       case "memoryBudget":
         return (await ready()).memoryBudget();
       case "loadModel": {
-        const loaded = await (await ready()).loadModel(request.path);
+        const loaded = reusingContexts(await (await ready()).loadModel(request.path));
         const modelId = nextId++;
         models.set(modelId, loaded);
         return { modelId, trainContextSize: loaded.trainContextSize };
       }
       case "countTokens":
-        return model(request.modelId).countTokens(request.text);
+        return model(request.modelId).countTokens(request.texts);
       case "createSession": {
         const opened = await model(request.modelId).createSession(
           request.systemPrompt,

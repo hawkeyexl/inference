@@ -26,7 +26,9 @@
  *                    outputs   { "<text only one item holds>": "<generated text>" | { throw: "<message>" } }
  *
  * The log also records "prefix" each time the shared tokens are evaluated: once
- * up front, and again whenever an erase could not keep them.
+ * up front, and again whenever an erase could not keep them; "context" with its
+ * size each time a context is created; and "count" with the number of texts
+ * each time the tokenizer is asked.
  */
 import { appendFileSync, writeSync } from "node:fs";
 import { basename } from "node:path";
@@ -79,24 +81,21 @@ export async function createWorkerBackend(options, hooks) {
       loaded += 1;
       return {
         trainContextSize: 131_072,
-        countTokens: (text) => Math.ceil(text.length / 4),
-        async createSession(systemPrompt, contextSize) {
+        countTokens(texts) {
+          record(`count ${label(gpu)} ${process.pid} ${texts.length}`);
+          return texts.map((text) => Math.ceil(text.length / 4));
+        },
+        async createContext(contextSize) {
+          record(`context ${label(gpu)} ${process.pid} ${contextSize}`);
+          // What the context holds outlives a session, as a real context's does.
+          const state = { tokens: [], input: 0, checkpoint: undefined };
           return {
             contextSize,
-            sequence: fakeSequence(systemPrompt, gpu, abortAt),
-            async prompt(text) {
-              record(`prompt ${label(gpu)} ${process.pid} ${encodeURIComponent(text)}`);
-              if (config.delayMs) {
-                await new Promise((r) => setTimeout(r, config.delayMs));
-              }
-              if (abortAt === "prompt") crash(gpu);
-              if (config.throwOnPrompt) throw new Error(config.throwOnPrompt);
-              return {
-                text: JSON.stringify({ match: "pass", confidence: 0.9, backend: label(gpu) }),
-                stopReason: "eogToken",
-                usage: { inputTokens: 42, outputTokens: 7 },
-              };
+            async clear() {
+              state.tokens = [];
+              state.checkpoint = undefined;
             },
+            session: (systemPrompt) => fakeSession(state, contextSize, systemPrompt, gpu, abortAt),
             async dispose() {},
           };
         },
@@ -108,26 +107,45 @@ export async function createWorkerBackend(options, hooks) {
   };
 }
 
+/** One call's session over a context: its chat, and the context's sequence. */
+function fakeSession(state, contextSize, systemPrompt, gpu, abortAt) {
+  return {
+    contextSize,
+    sequence: fakeSequence(state, systemPrompt, gpu, abortAt),
+    async prompt(text) {
+      record(`prompt ${label(gpu)} ${process.pid} ${encodeURIComponent(text)}`);
+      if (config.delayMs) {
+        await new Promise((r) => setTimeout(r, config.delayMs));
+      }
+      if (abortAt === "prompt") crash(gpu);
+      if (config.throwOnPrompt) throw new Error(config.throwOnPrompt);
+      return {
+        text: JSON.stringify({ match: "pass", confidence: 0.9, backend: label(gpu) }),
+        stopReason: "eogToken",
+        usage: { inputTokens: 42, outputTokens: 7 },
+      };
+    },
+    async dispose() {},
+  };
+}
+
 /**
  * A context sequence whose tokens are the characters of its text. The decision
  * logic in the worker drives it exactly as it drives node-llama-cpp's: render,
  * evaluate, checkpoint, probe, erase. Only the probabilities are scripted.
  */
-function fakeSequence(systemPrompt, gpu, abortAt) {
+function fakeSequence(state, systemPrompt, gpu, abortAt) {
   const kind = config.sequence ?? config.decide?.sequence ?? "attention";
   const outputs = config.shared?.outputs ?? {};
   const answers = config.decide?.answers ?? {};
   const encode = (text) => [...text].map((c) => c.codePointAt(0));
-  let tokens = [];
-  let input = 0;
-  let checkpoint;
   const evaluate = (more) => {
-    tokens.push(...more);
-    input += more.length;
+    state.tokens.push(...more);
+    state.input += more.length;
   };
   /** The scripted keys the context holds now; more than one is a reuse bug. */
   const holding = (scripted) => {
-    const text = String.fromCodePoint(...tokens);
+    const text = String.fromCodePoint(...state.tokens);
     const held = Object.keys(scripted).filter((key) => text.includes(key));
     if (held.length > 1) {
       throw new Error(`The fake sequence holds ${held.length} questions at once: ${held.join(", ")}.`);
@@ -139,9 +157,9 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
       return kind !== "attention";
     },
     get nextTokenIndex() {
-      return tokens.length;
+      return state.tokens.length;
     },
-    inputTokens: () => input,
+    inputTokens: () => state.input,
     render: (user, answerPrefix) =>
       encode(`<system>${systemPrompt}</system><user>${user}</user><assistant>${answerPrefix}`),
     labelTokens: (label) => encode(label),
@@ -151,14 +169,14 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
       evaluate(more);
     },
     async takeCheckpoint() {
-      if (kind === "hybrid") checkpoint = tokens.length;
+      if (kind === "hybrid") state.checkpoint = state.tokens.length;
     },
     async erase(start, end) {
-      const kept = [...tokens.slice(0, start), ...tokens.slice(end)];
-      tokens = [];
+      const kept = [...state.tokens.slice(0, start), ...state.tokens.slice(end)];
+      state.tokens = [];
       // A checkpoint restores the state as it was at its own length, no other.
-      if (kind === "attention" || checkpoint === start) {
-        tokens = kept;
+      if (kind === "attention" || state.checkpoint === start) {
+        state.tokens = kept;
         return;
       }
       // No state survives the erase: evaluate what is left from scratch.
@@ -186,7 +204,7 @@ function fakeSequence(systemPrompt, gpu, abortAt) {
       if (typeof output === "object") throw new Error(output.throw);
       for (const token of encode(output)) {
         // A yielded token is in the context from here on, as node-llama-cpp's are.
-        tokens.push(token);
+        state.tokens.push(token);
         yield token;
       }
     },

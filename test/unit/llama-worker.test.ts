@@ -514,6 +514,76 @@ describe("decisions in the worker", () => {
   });
 });
 
+/** The fixture's log lines of one kind, split into fields after the kind. */
+function logged(kind: "context" | "count"): { backend: string; pid: number; n: number }[] {
+  return readFileSync(log, "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith(`${kind} `))
+    .map((line) => {
+      const [, backend, pid, n] = line.split(" ");
+      return { backend: backend!, pid: Number(pid), n: Number(n) };
+    });
+}
+const contextSizes = (): number[] => logged("context").map((c) => c.n);
+
+describe("one context per model, reused across calls", () => {
+  it("reuses the context the first call created", async () => {
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    expect(contextSizes()).toEqual([8192]);
+  });
+
+  it("creates a larger context when a call needs one, and reuses it for a smaller call", async () => {
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    // About 10000 prompt tokens, so the call needs more than 8192 but less than twice it.
+    await p.completeJSON({ ...REQUEST, user: "x".repeat(40_000) });
+    const [small, large] = contextSizes();
+    expect(small).toBe(8192);
+    expect(large).toBeGreaterThan(8192);
+    expect(large).toBeLessThanOrEqual(2 * 8192);
+    await p.completeJSON(REQUEST);
+    expect(contextSizes()).toEqual([small, large]);
+  });
+
+  it("does not keep a context more than twice the size a call needs for it", async () => {
+    const p = provider();
+    await p.completeJSON({ ...REQUEST, user: "x".repeat(80_000) });
+    await p.completeJSON(REQUEST);
+    const [large, small] = contextSizes();
+    expect(large).toBeGreaterThan(2 * 8192);
+    expect(small).toBe(8192);
+  });
+
+  it("starts each call on an empty context", async () => {
+    // The fixture refuses a context holding two questions at once, so a
+    // context left holding the last call's final question fails here.
+    configureDecisions("hybrid");
+    const p = provider();
+    const first = await p.decide(DECIDE);
+    const second = await p.decide(DECIDE);
+    expect(second).toEqual(first);
+    expect(contextSizes()).toEqual([8192]);
+  });
+
+  it("creates a new context in the worker that replaces a crashed one, and reuses that", async () => {
+    configure({ abort: { cuda: "prompt" } });
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    expect(logged("context").map((c) => c.backend)).toEqual(["cuda", "vulkan"]);
+  });
+
+  it("counts a call's prompts in one request to the worker", async () => {
+    configureDecisions("attention");
+    await provider().decide(DECIDE);
+    // The system prompt and three questions, in one batch.
+    expect(logged("count").map((c) => c.n)).toEqual([4]);
+  });
+});
+
 const TURN = "The agent ran `git commit --no-verify`, then wrote a summary without hedges.\n\n";
 const VERDICT_SCHEMA = {
   type: "object",
