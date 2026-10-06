@@ -118,6 +118,24 @@ A string property's `maxLength` already reached the grammar, as a bounded repeti
 characters, and still does. A consumer that caps a reasoning string at 240 characters caps the
 tokens it costs.
 
+### Measured
+
+`qwen3.5-4b` on an RTX 4090 with CUDA, the profiled request, warm, mean of three calls. The shared
+request's schema caps `reasoning` at 240 characters, before and after.
+
+| Stage | Before | After |
+|---|---:|---:|
+| Decision probe, per question | 79.8 ms | 21.1 ms |
+| Session setup, per call | 146 ms | 0.2 ms |
+| 36-question `decide()`, in the worker | 4053 ms | 1532 ms |
+| 36-question `decide()`, through the model host | 4097 ms | 1860 ms |
+| Shared-prefix output, per item | 93.5 tokens | 71.5 tokens |
+| 36-item `completeJSONShared`, in the worker | 36.5 s | 22.4 s |
+| 36-item `completeJSONShared`, through the model host | 39.4 s | 28.1 s |
+
+The decisions matched the full readout to within 2.2e-6 after normalization, on new and reused
+contexts alike. Each of the 36 shared answers kept its highest-scored field.
+
 ### Consequences
 
 - Good, because the profiled probe drops from about 82 ms to about 24 ms a question.
