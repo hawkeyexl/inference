@@ -147,11 +147,16 @@ describe("toStrictSchema", () => {
     expect(strict["required"]).toEqual(["name", "tags", "nested"]);
   });
 
-  it("expresses optionality as a null type union", () => {
+  it("expresses optionality as a null type union, and only optionality", () => {
     const strict = toStrictSchema(schema) as never as {
       properties: Record<string, { type: unknown }>;
     };
-    expect(strict.properties["name"]!.type).toEqual(["string", "null"]);
+    // A required property must stay non-null. Making it nullable lets the model
+    // answer null, which stripNulls then removes, and the response fails the
+    // very schema it was asked for.
+    expect(strict.properties["name"]!.type).toBe("string");
+    expect(strict.properties["tags"]!.type).toEqual(["array", "null"]);
+    expect(strict.properties["nested"]!.type).toEqual(["object", "null"]);
   });
 
   it("drops keywords outside the strict subset", () => {
