@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.7](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.6...v0.5.0-decide-and-host.7) (2026-10-06)
+
+
+### Bug Fixes
+
+* **openai:** cap every request with openai.maxTokens ([4b15e31](https://github.com/hawkeyexl/inference/commit/4b15e315308ad02257becd2f1ab530d7f35d597e))
+
 # [0.5.0-decide-and-host.6](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.5...v0.5.0-decide-and-host.6) (2026-10-06)
 
 
