@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.5](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.4...v0.5.0-decide-and-host.5) (2026-10-06)
+
+
+### Features
+
+* **llama-cpp:** answer many items with schema-valid JSON over one shared prefix ([4dc487e](https://github.com/hawkeyexl/inference/commit/4dc487eed966237e8aa8d65736cfd6123027af9f))
+
 # [0.5.0-decide-and-host.4](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.3...v0.5.0-decide-and-host.4) (2026-10-05)
 
 
