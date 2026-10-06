@@ -1,3 +1,10 @@
+# [0.5.0-decide-and-host.6](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.5...v0.5.0-decide-and-host.6) (2026-10-06)
+
+
+### Bug Fixes
+
+* **openai:** keep a required property non-null in a strict schema ([6468f44](https://github.com/hawkeyexl/inference/commit/6468f4494914f23b00c4b2b4d1492fbe1fcb58af))
+
 # [0.5.0-decide-and-host.5](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.4...v0.5.0-decide-and-host.5) (2026-10-06)
 
 
