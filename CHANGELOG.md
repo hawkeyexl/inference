@@ -1,3 +1,10 @@
+# [0.5.0](https://github.com/hawkeyexl/inference/compare/v0.4.0...v0.5.0) (2026-10-07)
+
+
+### Features
+
+* decisions, jev, local model lifecycle and a model host ([#14](https://github.com/hawkeyexl/inference/issues/14)) ([a6b5552](https://github.com/hawkeyexl/inference/commit/a6b55523187cb13552a9ec58196964447ac78ad4))
+
 # [0.5.0-decide-and-host.7](https://github.com/hawkeyexl/inference/compare/v0.5.0-decide-and-host.6...v0.5.0-decide-and-host.7) (2026-10-06)
 
 
