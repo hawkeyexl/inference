@@ -64,7 +64,7 @@ machine with no credentials — see
 No provider specified. Detecting one probes the environment, the Claude CLI and the local
 model runtime, which cannot be done synchronously — use
 resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai,
-claude-cli, mock, llama-cpp).
+claude-cli, jev, mock, llama-cpp).
 ```
 
 You called the **synchronous** `makeProvider` or `resolveProviderIdentity` with `provider` omitted
@@ -76,7 +76,7 @@ or set to `"auto"`.
 
 ```text
 Model "gpt-4o-mini" was given without a provider, and a model name does not say which
-provider owns it. Name the provider too (anthropic, openai, claude-cli, mock, llama-cpp),
+provider owns it. Name the provider too (anthropic, openai, claude-cli, jev, mock, llama-cpp),
 or drop the model to take the detected provider's default.
 ```
 
@@ -140,6 +140,68 @@ a slow machine can genuinely exceed it.
 
 **Fix:** retry, raise `timeoutMs`, or install it yourself.
 
+### `Jev provider needs <VAR> set (or choose another provider)`
+
+The Jev provider was constructed and `process.env[apiKeyEnv]` was empty. `<VAR>` is
+`TYPESAFE_API_KEY` unless you set `apiKeyEnv`.
+
+**Fix:** export the key, or name a different provider.
+
+### `The jev provider answers decisions only and cannot generate JSON.`
+
+`completeJSON` was called on a `jev` provider. Jev returns a probability for each option and
+generates no text.
+
+**Fix:** check `canDecide(provider)` and call `decide()`, or choose another provider for
+`completeJSON`.
+
+### `decide() question "<Q>" has <N> criteria; Jev accepts at most 255.`
+
+A question has more options than Jev's limit.
+
+**Fix:** split the question, or group the options.
+
+### `Jev rejected the API key (HTTP 401). Check <VAR>`
+
+Jev answered 401. The message names the variable the key was read from and, when Jev explained,
+what it said.
+
+**Fix:** check that `<VAR>` holds a current key.
+
+### `Jev rejected the request as invalid (HTTP 422)`
+
+Jev validated the request and refused it. The message ends with Jev's own reason.
+
+**Fix:** act on that reason. A question with fewer than two options, or state beyond the 32000-token
+limit, are the usual causes.
+
+### `Jev rate limit exceeded (HTTP 429). Retry with backoff` and `Jev is overloaded (HTTP 529). Retry with backoff`
+
+Jev is limiting you or is short of capacity. The library does not retry a decision for you.
+
+**Fix:** retry with backoff.
+
+### `Jev request failed with HTTP <N>`
+
+Any other non-success status. The message ends with Jev's reason or the start of its body.
+
+**Fix:** read the reason. A 5xx is Jev's, and retrying is reasonable.
+
+### `Jev request failed: <REASON>` and `Jev request timed out after <N>ms.`
+
+The request did not complete. `<REASON>` is the network error. The timeout is `timeoutMs`, 60000
+unless you set it.
+
+**Fix:** check connectivity and `baseUrl`, or raise `timeoutMs`.
+
+### `Jev returned a response this library cannot read: <WHY>.`
+
+Jev answered 200 with a body that is not JSON, or lacks the answer, its type or its probabilities
+for a question you asked. A probability for an option the question did not have fails with the
+`Decision weight names "<O>", which is not one of the question's criteria` message instead.
+
+**Fix:** report it with the request. If `baseUrl` points at a proxy, check what it returns.
+
 ### `Timed out waiting for another process to install node-llama-cpp into <DIR>`
 
 Another process holds the prefix lock. Concurrent runs serialise so two npm processes never write
@@ -147,6 +209,30 @@ one `node_modules`.
 
 **Fix:** wait for the other run. If nothing else is running, the lock was orphaned by a killed
 process — remove the named `.install.lock` and retry.
+
+### `Timed out waiting for another process to download <FILE> into <DIR>`
+
+[`ensureModel`](/inference/reference/local-models/#preparing-a-model) waited two hours for another
+process's download of the same model. Concurrent downloads serialise on a lock in the models
+directory.
+
+**Fix:** wait for the other run. If nothing else is running, remove the named
+`.download-<FILE>.lock` and retry. A lock whose process has died is reclaimed without your help.
+
+### `Cannot prepare a llama-cpp model: <REASON>. Nothing was downloaded.`
+
+`ensureModel` needs the `node-llama-cpp` runtime and cannot get it. `<REASON>` is one of the lines
+from the [detection table](#no-inference-provider-is-available-tried): installing is refused by
+`INFERENCE_NO_AUTO_INSTALL`, or the installed copy fails to load.
+
+**Fix:** unset `INFERENCE_NO_AUTO_INSTALL`, or fix the installed copy.
+
+### `Cannot size llama-cpp model "<M>": it is not in the catalog and its file is not downloaded to <DIR>.`
+
+[`fits`](/inference/reference/local-models/#preparing-a-model) sizes a model that is not in the
+catalog from its file, and the file is not there.
+
+**Fix:** `await ensureModel(model)` first, or name a catalog model.
 
 ### `llama-cpp model "<M>" is a selector and cannot be resolved synchronously — …`
 
@@ -185,7 +271,39 @@ or `false`. Thrown when the provider is constructed.
 **Fix:** use one of the listed values, or leave it unset so `NODE_LLAMA_CPP_GPU` decides, and
 failing that `"auto"`. The CPU is `false`, not `"cpu"`.
 
-### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, mock, llama-cpp.`
+### `llamaCpp.host must be "off", "connect" or "spawn", got <X>.`
+
+`llamaCpp.host` was not one of the three modes. Thrown when the provider is constructed.
+
+**Fix:** use `"off"` (the default), `"connect"` or `"spawn"`. See
+[the model host](/inference/reference/local-models/#the-model-host).
+
+### `llamaCpp.keepAlive must be a non-negative number of milliseconds, got <X>.` — or `llamaCpp.hostWaitMs must be …`
+
+`keepAlive` or `hostWaitMs` was negative, `NaN`, or not a number. Thrown when the provider is
+constructed.
+
+**Fix:** pass milliseconds, `0` or more, or leave it unset for the default.
+
+### `llamaCpp.session must be a non-empty string, got <X>.`
+
+`llamaCpp.session` was empty or not a string. Thrown when the provider is constructed.
+
+**Fix:** name the session, for example with your own session id, or leave it unset.
+
+### `releaseModelHost needs { session } or { all: true }.`
+
+`releaseModelHost` was called with neither a non-empty `session` nor `all: true`.
+
+**Fix:** pass one of the two.
+
+### `leaseModelHost needs a non-empty session, got <X>.`
+
+`leaseModelHost` was called without a session to name the lease.
+
+**Fix:** pass `session`, the name later calls and `releaseModelHost` refer to.
+
+### `Unknown provider "<P>". Available: anthropic, openai, claude-cli, jev, mock, llama-cpp.`
 
 A `provider` value outside the five. Usually a typo, or free text arriving from a CLI flag.
 
@@ -208,9 +326,81 @@ The dynamic import failed. The original error is appended in parentheses.
 **Fix:** `npm install node-llama-cpp`. It is an optional peer dependency and is never installed for
 you.
 
+### `decide() needs at least one question.`
+
+This and the five messages after it are rejections from `decide()`, not construction errors. See
+[decisions](/inference/reference/providers/#decisions).
+
+A `decide` request whose `questions` object is empty.
+
+**Fix:** ask at least one question.
+
+### `decide() question ids must be non-empty strings.` — or `decide() question "<Q>" has an empty criterion id.`
+
+A key of `questions`, or a key of a question's `criteria`, is `""`. Ids are what the answers are
+keyed by, so an empty one cannot be told apart.
+
+**Fix:** give every question and every option a non-empty id.
+
+### `decide() question "<Q>" needs at least two criteria, got <N>.`
+
+A question offers fewer than two options. A decision between one option is no decision.
+
+**Fix:** add the options the question chooses between to its `criteria`.
+
+### `decide() question "<Q>" has type "<T>"; the only question type is "choice".`
+
+A question's `type` is not `"choice"`. Usually a JavaScript caller with no type checking.
+
+**Fix:** set `type: "choice"`.
+
+### `Decision weight names "<O>", which is not one of the question's criteria (<OPTIONS>).`
+
+A provider, or a `MockProvider` script, gave a probability or a choice for an option the question
+does not offer. With `mockDecisions`, the scripted option id is misspelled or belongs to another
+question.
+
+**Fix:** use one of the listed option ids.
+
+### `Decision weight for "<O>" must be a finite, non-negative number, got <X>.`
+
+A provider, or a `MockProvider` script, gave a weight that is negative, `NaN` or infinite.
+
+**Fix:** script weights of 0 or more. They need not sum to 1, since they are normalized.
+
+### `llama-cpp decide() question "<Q>" has <N> criteria; it letters options A to Z, so 26 at most.`
+
+The llama-cpp provider asks the model for a letter per option, and the alphabet has 26. See
+[decisions](/inference/reference/local-models/#decisions).
+
+**Fix:** split the question, or group its options into at most 26.
+
+### `This llama-cpp runtime's sessions have no decide(), so the provider cannot answer decisions.`
+
+A `LlamaRuntime` you injected opens sessions without the optional `decide` method. The default
+runtime has it.
+
+**Fix:** add `decide` to your fake's sessions, or leave `runtime` unset.
+
+### `This llama-cpp runtime's sessions have no completeShared(), so the provider cannot answer over a shared prefix.`
+
+A `LlamaRuntime` you injected opens sessions without the optional `completeShared` method, which
+`completeJSONShared` uses on the local provider. The default runtime has it.
+
+**Fix:** add `completeShared` to your fake's sessions, or leave `runtime` unset.
+
+### `completeJSONShared concurrency must be a positive integer, got <X>.`
+
+`concurrency` bounds the calls in flight on a provider without a native shared-prefix path. It was
+0, negative, fractional or not a number. See
+[`completeJSONShared`](/inference/reference/completion/#completejsonshared).
+
+**Fix:** pass a positive integer, or leave it unset for 8.
+
 ## Model failures — recorded on `run.error`
 
-None of these throw. Each arrives with `result` (or `verdict`) absent.
+None of these throw. Each arrives with `result` (or `verdict`) absent. `completeJSONShared` records
+the same messages on each failed item's `error`, in that item's place in `answers`.
 
 ### `Response failed schema validation: <path> <message>; …`
 
@@ -219,6 +409,13 @@ Ajv rejected the response on the final attempt. One clause per validation error,
 **Fix:** usually the schema, not the model. Check the shape is expressible — and if you are on a
 local model, that you are not relying on `required` or numeric bounds, which
 [a grammar does not enforce](/inference/local/choosing-a-model/#what-changes-under-a-grammar).
+
+### `The local model returned no answer for this item.`
+
+Recorded by `completeJSONShared` on the local provider when its session returned fewer outputs than
+items. The default runtime always returns one per item; an injected `LlamaRuntime` may not.
+
+**Fix:** have your fake's `completeShared` return one entry in `outputs` per prompt.
 
 ### `Response contained no parseable JSON object`
 
@@ -251,6 +448,13 @@ to fail validation, which would have burned the retry on a misleading error.
 
 **Fix:** raise `anthropic.maxTokens` (default 1024).
 
+### `OpenAI-compatible response hit max_tokens (<N>) before the JSON was complete — raise the openai.maxTokens option.`
+
+The response stopped at the output cap (`finish_reason: "length"`) with the JSON unfinished.
+Reported as itself rather than as a parse or validation failure.
+
+**Fix:** raise `openai.maxTokens` (default 4096).
+
 ### `Anthropic response contained no tool_use block`
 
 The response came back without the forced tool call. Rare; usually a refusal.
@@ -275,6 +479,7 @@ the context to keep generating, and the rest of the answer would follow a prompt
 The prompt does not fit the largest context the model supports. `<N>` is the system prompt with its
 restated schema, plus the user prompt, plus 512 tokens of chat-template overhead, plus room for the
 response: `maxTokens`, or 2048 when it is unset, plus `thoughtTokens`. The message lists each count.
+For `decide()`, the user prompt is the longest question's, and the response is 8 tokens.
 
 Nothing is generated. Sending the prompt anyway would make llama.cpp shift its start out of the
 context, and the model would answer a prompt you did not send. Called directly, `completeJSON`
@@ -333,7 +538,63 @@ not be run again.
 
 **Fix:** read `<ERR>`. This is a machine-level failure, not a model one.
 
-### `The local-model worker was not initialised.` — or `The local-model worker has no model <N>.`, `The local-model worker has no session <N>.`
+### `The request for "<M>" waited <N> ms in the model host's queue without starting, so it was withdrawn (hostWaitMs). Nothing ran.`
+
+Thrown as `ModelHostBusyError`, a subclass of `InferenceError` whose `name` is
+`"ModelHostBusyError"`. The [model host](/inference/reference/local-models/#the-model-host) runs
+one call per model at a time, and this call was still waiting behind others when its `hostWaitMs`
+ran out. Nothing ran, so nothing was paid for. `completeValidatedJSON` and `judge` record it on
+`run.error`.
+
+**Fix:** match it by class or by `name` to skip the work or try again later, or raise
+`llamaCpp.hostWaitMs`, or leave it unset to wait as long as it takes.
+
+### `The model host did not start within <N> s. Its log is <LOG>.`
+
+A provider with `host: "spawn"`, or `leaseModelHost`, started a model host, and none answered in
+time. The host's stderr is in `<LOG>`, inside `<runtime dir>/host/`.
+
+**Fix:** read the log. A host that cannot listen on its pipe or socket, or cannot import the
+runtime, says so there.
+
+### `The model host exited twice while answering this request, so it was not answered. Its log is <LOG>.`
+
+In spawn mode, a host that dies mid-call is replaced and the call retried once. The replacement died
+too.
+
+**Fix:** read the log. Something is killing the host process, or it cannot run on this machine. Use
+`host: "off"` meanwhile.
+
+### `The model host exited while loading "<M>" for a lease. Its log is <LOG>.`
+
+`leaseModelHost` asked a host to load a model, and the host died first. A lease is not retried.
+
+**Fix:** read the log, then call `leaseModelHost` again.
+
+### `The model host was stopped by releaseModelHost({ all: true }) before this request ran.` — or `The model host is stopping and took no new requests.`
+
+`releaseModelHost({ all: true })` ran while this call was waiting in the host's queue, or arrived
+as the host was stopping. Nothing ran.
+
+**Fix:** run the call again. The next one starts a new host in spawn mode.
+
+### `The model host refused this client: its token does not match <FILE>.` — or `The model host does not know the operation <OP>.`
+
+A client reached the host's pipe or socket with the wrong token, or sent an operation this host
+does not serve. These should not appear between a client and a host from the same release.
+
+**Fix:** stop the host with `releaseModelHost({ all: true })`, or end its process, and retry. Check
+that only one version of this package uses the runtime directory.
+
+### `The model has no single token for the answer label "<L>", so it cannot decide.`
+
+A decision reads the probability of each option's letter as the next token. This model's vocabulary
+spells the letter `<L>` only as several tokens, with or without a leading space, so there is no one
+token to read. No catalog model does this.
+
+**Fix:** use a catalog model for decisions.
+
+### `The local-model worker was not initialised.` — or `The local-model worker has no model <N>.`, `The local-model worker has no session <N>.`, `This local-model session has no context sequence to decide on.`
 
 An internal consistency check in the worker failed. These should never appear.
 

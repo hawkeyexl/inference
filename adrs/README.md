@@ -24,3 +24,10 @@ of [CLAUDE.md](../CLAUDE.md) for when one is required and what it must contain.
 | [01010](01010-restore-the-grammar-omitted-open-brace.md) | Restore the opening brace grammar-constrained generation omits, so the local provider works at all |
 | [01011](01011-size-the-local-context-to-the-prompt.md) | Size the local model's context to the prompt, not to free memory, with a `contextSize` override |
 | [01012](01012-isolate-local-inference-in-a-worker-process.md) | Run local inference in a worker process, and fall back from a GPU backend that crashes it |
+| [01013](01013-decisions-as-an-optional-provider-capability.md) | Add decisions as an optional provider capability, in Jev's request shape |
+| [01014](01014-model-lifecycle-helpers-for-the-local-provider.md) | Add `ensureModel`, `modelState` and `fits` so a consumer can prepare a local model without loading it |
+| [01015](01015-the-jev-decision-provider.md) | Add `jev`, a hosted decision provider, that is never auto-detected and never answers `completeJSON` |
+| [01016](01016-decide-on-local-models-from-letter-probabilities.md) | Decide on local models from the next-token probabilities of option letters, evaluating the shared state once |
+| [01017](01017-keep-local-models-loaded-in-a-model-host.md) | Keep local models loaded across processes in an opt-in model host |
+| [01018](01018-structured-answers-over-a-shared-prefix.md) | Answer many items with schema-valid JSON over one shared prefix, evaluating the prefix once on local models |
+| [01019](01019-cut-the-fixed-cost-of-a-local-call.md) | Cut the fixed cost of a local call: read the top 40 tokens for a decision, reuse one context, and generate compact JSON |

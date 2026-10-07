@@ -12,7 +12,7 @@ import type {
 } from "./types.js";
 
 interface ChatResponse {
-  choices?: { message?: { content?: string } }[];
+  choices?: { message?: { content?: string }; finish_reason?: string }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string };
 }
@@ -56,14 +56,20 @@ export function toStrictSchema(
     delete obj["uniqueItems"];
     const properties = obj["properties"];
     if (properties && typeof properties === "object") {
+      // Strict mode lists every property as required, so an optional one says
+      // "absent" with null. A property the caller required stays non-null:
+      // nullable, the model may answer null, stripNulls removes it, and the
+      // response then fails the schema it was asked for.
+      const required = new Set(Array.isArray(obj["required"]) ? (obj["required"] as unknown[]) : []);
       obj["required"] = Object.keys(properties);
       // Strict mode requires additionalProperties:false on EVERY object, not
       // just the root. A nested object without it is rejected as a schema
       // error, which permanently downgrades this provider to the weaker
       // json_object fallback for the rest of its life.
       obj["additionalProperties"] = false;
-      for (const prop of Object.values(properties as Record<string, unknown>)) {
+      for (const [name, prop] of Object.entries(properties as Record<string, unknown>)) {
         walk(prop);
+        if (required.has(name)) continue;
         if (prop && typeof prop === "object" && !Array.isArray(prop)) {
           const p = prop as Record<string, unknown>;
           if (typeof p["type"] === "string" && p["type"] !== "null") {
@@ -93,11 +99,18 @@ export function stripNulls(value: unknown): unknown {
 export interface OpenAICompatProviderOptions {
   /** `json_schema.name` sent to the server. Cosmetic; steers some models. */
   schemaName?: string;
+  /**
+   * The output cap sent as `max_tokens`, default 4096. A server that reserves
+   * credit for the model's whole output window refuses an uncapped request on
+   * a small budget, so every request carries one.
+   */
+  maxTokens?: number;
 }
 
 export class OpenAICompatProvider implements InferenceProvider {
   private supportsJsonSchema = true;
   private readonly schemaName: string;
+  private readonly maxTokens: number;
 
   constructor(
     private readonly baseUrl: string,
@@ -113,6 +126,7 @@ export class OpenAICompatProvider implements InferenceProvider {
       );
     }
     this.schemaName = options.schemaName ?? "result";
+    this.maxTokens = options.maxTokens ?? 4096;
   }
 
   provider(): string {
@@ -132,7 +146,7 @@ export class OpenAICompatProvider implements InferenceProvider {
           "content-type": "application/json",
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ max_tokens: this.maxTokens, ...body }),
       },
     );
     const json = (await response.json().catch(() => ({}))) as ChatResponse;
@@ -184,6 +198,11 @@ export class OpenAICompatProvider implements InferenceProvider {
       response = await this.jsonObjectFallback(base, req);
     }
 
+    if (response.choices?.[0]?.finish_reason === "length") {
+      throw new InferenceError(
+        `OpenAI-compatible response hit max_tokens (${String(this.maxTokens)}) before the JSON was complete — raise the openai.maxTokens option.`,
+      );
+    }
     const content = response.choices?.[0]?.message?.content;
     if (!content) throw new Error("Empty completion response");
     return {

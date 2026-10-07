@@ -189,7 +189,7 @@ export function isLlamaSelector(model: string): model is LlamaSelector {
  * several times the file size keeps `auto` from picking a model that technically
  * loads and then thrashes.
  */
-const MEMORY_HEADROOM = 3.5;
+export const MEMORY_HEADROOM = 3.5;
 
 /**
  * Largest tier whose weights fit the memory budget with headroom. Lands at

@@ -1,6 +1,6 @@
 ---
 title: Completion reference
-description: completeValidatedJSON, CompleteValidatedOptions, InferenceRun, and validatorFor.
+description: completeValidatedJSON, CompleteValidatedOptions, InferenceRun, validatorFor, and completeJSONShared for many answers over one shared prefix.
 sidebar:
   order: 2
 ---
@@ -101,6 +101,53 @@ equal-but-distinct schemas sharing an `$id` would otherwise collide in a shared 
   number is soft. See [cost and budgets](/inference/judge/cost-and-budgets/).
 </Aside>
 
+## `completeJSONShared`
+
+```ts
+function completeJSONShared(
+  provider: InferenceProvider,
+  req: SharedJSONRequest,
+): Promise<SharedJSONResponse>;
+
+interface SharedJSONRequest {
+  system: string;
+  shared: string;                 // the long part every item shares; it comes first
+  items: string[];                // each item's own tail, appended to `shared` as it is
+  schema: Record<string, unknown>;
+  temperature?: number;           // default 0
+  concurrency?: number;           // default 8; calls in flight on a provider without a native path
+}
+
+type SharedJSONAnswer = { json: unknown } | { error: string };
+
+interface SharedJSONResponse {
+  answers: SharedJSONAnswer[];    // one per item, in item order
+  usage?: TokenUsage;             // summed over the items that report it
+  reuse?: "erase" | "checkpoint" | "reevaluate";   // llama-cpp only; absent for one item
+}
+```
+
+One schema-valid answer per item, where item `i` is asked with the user turn `shared + items[i]`.
+Nothing is inserted between the two, so end `shared` with the separator you want. It is the call
+for judging one long text against many rules, each answered as its own object, such as
+`{ "followed": 0-100, "not-followed": 0-100, "not-applicable": 0-100 }`.
+
+| Provider | How the items run |
+|---|---|
+| `llama-cpp` | One session evaluates the shared prefix once, then generates each item's answer from it under the schema's grammar. See [shared-prefix completions](/inference/reference/local-models/#shared-prefix-completions). |
+| every other provider, and `MockProvider` | One `completeValidatedJSON` call per item, with its retry, at most `concurrency` at a time. |
+
+Every answer is validated against `schema`, the local ones included, since a grammar does not check
+every keyword. An item that fails is `{ error }` in its place, with the same messages a run's
+`error` carries. It is never dropped and never coerced, so `answers.length === items.length`.
+The call rejects only when nothing can be answered: an `InferenceError` for a bad `concurrency`, or
+from the local provider when the model cannot load, the longest item does not fit the context, or
+the model host exits twice. No items resolve to `{ answers: [] }` without calling the provider.
+
+`MockProvider` answers each item from its next scripted response, in item order, so a pipeline
+built on this tests offline. A retried item takes the next response after those.
+
 ## Source of truth
 
-`src/complete.ts`. Retry and validation edge cases are pinned in `test/unit/complete.test.ts`.
+`src/complete.ts`. Retry and validation edge cases are pinned in `test/unit/complete.test.ts`, and
+`completeJSONShared` in `test/unit/complete-shared.test.ts`.

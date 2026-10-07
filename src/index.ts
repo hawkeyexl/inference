@@ -21,8 +21,21 @@ export type {
   ExecOptions,
   ExecResult,
   InferenceProvider,
+  SharedJSONAnswer,
+  SharedJSONRequest,
+  SharedJSONResponse,
   TokenUsage,
 } from "./providers/types.js";
+
+// Decision capability — optional, detected with canDecide (ADR 01013)
+export { canDecide } from "./providers/decide.js";
+export type {
+  DecideAnswer,
+  DecideQuestion,
+  DecideRequest,
+  DecideResponse,
+  DecisionProvider,
+} from "./providers/decide.js";
 
 // Provider factory
 export {
@@ -58,8 +71,15 @@ export {
 } from "./providers/openai-compat.js";
 export type { OpenAICompatProviderOptions } from "./providers/openai-compat.js";
 export { ClaudeCliProvider } from "./providers/claude-cli.js";
+export { DEFAULT_JEV_BASE_URL, JevProvider } from "./providers/jev.js";
+export type { JevProviderOptions } from "./providers/jev.js";
 export { MockProvider, mockVerdict } from "./providers/mock.js";
-export type { MockResponse } from "./providers/mock.js";
+export type {
+  MockDecision,
+  MockDecisions,
+  MockProviderOptions,
+  MockResponse,
+} from "./providers/mock.js";
 
 // Local models (llama.cpp). `node-llama-cpp` is an optional peer dependency —
 // importing these names does not load it; constructing a provider does.
@@ -88,13 +108,37 @@ export {
 } from "./providers/llama-cpp.js";
 export type {
   LlamaCppProviderOptions,
+  LlamaDecideOptions,
+  LlamaDecideResult,
+  LlamaDecideReuse,
   LlamaGpu,
   LlamaLoadedModel,
   LlamaPromptOptions,
   LlamaPromptResult,
   LlamaRuntime,
   LlamaSession,
+  LlamaSharedOptions,
+  LlamaSharedResult,
+  ModelHostMode,
 } from "./providers/llama-cpp.js";
+export {
+  ModelHostBusyError,
+  leaseModelHost,
+  modelHostStatus,
+  releaseModelHost,
+} from "./providers/model-host.js";
+export type {
+  LeaseModelHostOptions,
+  ModelHostStatus,
+  ReleaseModelHostResult,
+} from "./providers/model-host.js";
+export { ensureModel, fits, modelState } from "./providers/llama-lifecycle.js";
+export type {
+  EnsureModelResult,
+  FitsResult,
+  LlamaModelLifecycleOptions,
+  LlamaModelState,
+} from "./providers/llama-lifecycle.js";
 export { clearLlamaModels } from "./providers/llama-clean.js";
 export type {
   ClearLlamaModelsOptions,
@@ -116,7 +160,7 @@ export type {
 export { realExec } from "./exec.js";
 
 // Completion
-export { completeValidatedJSON, validatorFor } from "./complete.js";
+export { completeJSONShared, completeValidatedJSON, validatorFor } from "./complete.js";
 export type {
   CompleteValidatedOptions,
   InferenceRun,

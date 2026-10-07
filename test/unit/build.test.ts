@@ -9,13 +9,14 @@ import { describe, expect, it } from "vitest";
 import config from "../../tsup.config.js";
 
 describe("the build", () => {
-  it("emits the local-model worker as its own entry beside index.js", () => {
+  it("emits the local-model worker and the model host as entries beside index.js", () => {
     const options = (Array.isArray(config) ? config[0] : config) as {
       entry?: Record<string, string>;
     };
     expect(options.entry).toMatchObject({
       index: "src/index.ts",
       "llama-worker": "src/providers/llama-worker.ts",
+      "llama-hostd": "src/providers/llama-hostd.ts",
     });
   });
 });

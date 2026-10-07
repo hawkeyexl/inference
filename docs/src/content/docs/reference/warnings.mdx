@@ -1,19 +1,19 @@
 ---
 title: Warnings reference
-description: The eight warnings the library writes to console.warn, when each fires, and how to reset them in tests.
+description: The nine warnings the library writes to console.warn, when each fires, and how to reset them in tests.
 sidebar:
   order: 9
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The library writes to `console.warn` in exactly eight places. Nothing else in the docset says so,
+The library writes to `console.warn` in exactly nine places. Nothing else in the docset says so,
 which matters if your tool owns its own output formatting.
 
 Each warning fires **at most once**, but the scope of "once" differs per warning, and that catches
 people out in tests.
 
-## The eight
+## The nine
 
 | Warning | Fires once per | Reset with |
 |---|---|---|
@@ -25,6 +25,7 @@ people out in tests.
 | Local runtime being installed | process | `resetRuntimeInstall()` |
 | Local backend crashed, switching | **backend switch** | none — a crashed backend stays skipped for the process |
 | Local-model worker missing | process | none |
+| Model host missing | process | none |
 
 ### `inference: running on Node <version>, older than the Node 24 this package requires. npm only warns about that at install time (EBADENGINE), so nothing has stopped you yet — upgrade Node, or expect failures this library cannot explain.`
 
@@ -103,6 +104,15 @@ start on the one that works, or to fail fast instead of waiting.
 Fires once when the package's `llama-worker.js` is not next to its `index.js`, which happens when a
 bundler has inlined this library into a file of its own. Local models then run in your process, as
 they did before the worker existed, and a native crash in llama.cpp will end it.
+
+**Fix:** mark `@hawkeyexl/inference` as external in your bundler.
+
+### `inference: the model host (llama-hostd.js) is missing beside this library — was it bundled? …`
+
+Fires once when a provider with `host: "spawn"` needs to start the
+[model host](/inference/reference/local-models/#the-model-host) and the package's `llama-hostd.js`
+is not next to its `index.js`. The call then runs in your process's own worker, as with
+`host: "off"`.
 
 **Fix:** mark `@hawkeyexl/inference` as external in your bundler.
 

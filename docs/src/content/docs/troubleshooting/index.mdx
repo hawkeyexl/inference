@@ -38,9 +38,9 @@ Everything else follows. If you have a message in hand, go straight to the
 ```text
 [operational]
  1. InferenceError: Anthropic provider needs NOT_SET_XYZ set (or choose another provider)
- 2. InferenceError: No provider specified. Detecting one probes the environment, the Claude CLI and the local model runtime, which cannot be done synchronously — use resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai, claude-cli, mock, llama-cpp).
+ 2. InferenceError: No provider specified. Detecting one probes the environment, the Claude CLI and the local model runtime, which cannot be done synchronously — use resolveProviderIdentityAsync/makeProviderAsync, or name a provider (anthropic, openai, claude-cli, jev, mock, llama-cpp).
  3. InferenceError: llama-cpp model "auto" is a selector and cannot be resolved synchronously — picking a tier probes GPU memory. Use resolveProviderIdentityAsync/makeProviderAsync, or name a concrete model (e.g. "qwen3.5-4b").
- 4. InferenceError: Unknown provider "nope". Available: anthropic, openai, claude-cli, mock, llama-cpp.
+ 4. InferenceError: Unknown provider "nope". Available: anthropic, openai, claude-cli, jev, mock, llama-cpp.
  5. InferenceError: Unknown llama-cpp model "not-a-model". Use a selector (auto, fast, balanced, quality), a curated alias (granite-4.1-3b-q2, qwen3.5-4b, qwen3.5-9b, gemma-4-e2b, gemma-4-e4b, gemma-4-12b, gemma-4-26b-a4b, gemma-4-e2b-q2), an hf: URI, or a path to a .gguf file.
  6. Error: MockProvider needs at least one scripted response
 
@@ -111,7 +111,7 @@ else.
 
 {/* test {"testId":"diagnose-errors","description":"Both failure classes provoked for real, so the documented messages cannot drift."} */}
 {/* step {"description":"A missing credential throws InferenceError at construction, before any call.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"InferenceError: Anthropic provider needs NOT_SET_XYZ set (or choose another provider)"}} */}
-{/* step {"description":"An unknown provider name lists the available ones.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Unknown provider \"nope\". Available: anthropic, openai, claude-cli, mock, llama-cpp."}} */}
+{/* step {"description":"An unknown provider name lists the available ones.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Unknown provider \"nope\". Available: anthropic, openai, claude-cli, jev, mock, llama-cpp."}} */}
 {/* step {"description":"A schema failure is recorded on the run rather than thrown, and result stays absent.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"run.result: undefined"}} */}
 {/* step {"description":"Each claude-cli subprocess failure reports its own distinct message.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Failed to run claude: ENOENT (is the Claude CLI installed?)"}} */}
 {/* step {"description":"Non-JSON CLI output names the Claude CLI and quotes what it printed, instead of leaking a bare SyntaxError.","runCode":{"language":"javascript","code":"process.stdout.write(require('node:child_process').execFileSync('node',['examples/diagnose-errors.mjs'],{encoding:'utf8',stdio:['ignore','pipe','inherit']}))","stdio":"Claude CLI printed non-JSON output (is it logged in?): Welcome to Claude Code!"}} */}

@@ -10,7 +10,7 @@
  * machine without the binding.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,12 +19,19 @@ import type { MockInstance } from "vitest";
 import {
   InferenceError,
   LlamaCppProvider,
+  completeJSONShared,
   completeValidatedJSON,
   defaultLlamaRuntime,
   disposeLlamaModels,
   makeProviderAsync,
 } from "../../src/index.js";
-import type { CompleteJSONRequest } from "../../src/index.js";
+import type {
+  CompleteJSONRequest,
+  DecideRequest,
+  LlamaDecideResult,
+  LlamaRuntime,
+  LlamaSharedResult,
+} from "../../src/index.js";
 import {
   llamaWorkerPids,
   resetLlamaWorkers,
@@ -66,7 +73,7 @@ function configure(config: Record<string, unknown>): void {
 }
 
 /** The fixture's log, as `[event, backend, pid]` triples. */
-function events(kind: "init" | "prompt"): { backend: string; pid: number }[] {
+function events(kind: "init" | "prompt" | "decide" | "prefix" | "generate"): { backend: string; pid: number }[] {
   let text = "";
   try {
     text = readFileSync(log, "utf8");
@@ -235,7 +242,7 @@ describe("falling back from a crashing backend", () => {
     expect(run.error).toMatch(
       /crashed the local-model worker on every backend this machine offers — CUDA \(.*\), Vulkan \(.*\), CPU \(.*\)\. The request was not answered\./,
     );
-  });
+  }, 30_000); // three backends crash in turn, each a fresh worker; a slow runner needs more than 5s
 
   it.each(["init", "load"] as const)(
     "falls back from a crash during %s too",
@@ -305,6 +312,467 @@ describe("an explicitly chosen backend", () => {
     expect(() => provider({ gpu: gpu as never })).toThrow(
       /llamaCpp\.gpu must be "auto", "cuda", "vulkan", "metal" or false/,
     );
+  });
+});
+
+const STATE = "The agent ran `git commit --no-verify`, then wrote a summary.";
+const DECIDE: DecideRequest = {
+  state: STATE,
+  questions: {
+    hooks: {
+      type: "choice",
+      instructions: "Did the agent skip a git hook?",
+      criteria: { yes: "It skipped one.", no: "It ran every hook." },
+    },
+    tests: {
+      type: "choice",
+      instructions: "Did the agent run the tests?",
+      criteria: { yes: "It ran them.", no: "It did not." },
+    },
+    tone: {
+      type: "choice",
+      instructions: "How did the agent word its summary?",
+      criteria: { plain: "Plainly.", hedged: "With hedges.", absent: "There was none." },
+    },
+  },
+};
+
+/**
+ * The fixture's scripted next-token probabilities, keyed by text only that
+ * question's prompt holds. Letters take only part of the mass, as on a real
+ * model, and the fixture refuses a context holding two questions at once.
+ */
+function configureDecisions(sequence: string, extra: Record<string, unknown> = {}): void {
+  configure({
+    decide: {
+      sequence,
+      answers: {
+        "skip a git hook": { A: 0.375, B: 0.125 },
+        "run the tests": { B: 0.9 },
+        "word its summary": { A: 0.1, C: 0.4 },
+      },
+    },
+    ...extra,
+  });
+}
+
+/** The real runtime, recording what each session's decide() reported. */
+function recordingDecisions(): { runtime: LlamaRuntime; results: LlamaDecideResult[] } {
+  const results: LlamaDecideResult[] = [];
+  const real = defaultLlamaRuntime();
+  return {
+    results,
+    runtime: {
+      ...real,
+      async loadModel(path) {
+        const model = await real.loadModel(path);
+        return {
+          ...model,
+          async createSession(systemPrompt, contextSize) {
+            const session = await model.createSession(systemPrompt, contextSize);
+            return {
+              ...session,
+              async decide(options) {
+                const result = await session.decide!(options);
+                results.push(result);
+                return result;
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+}
+
+describe("decisions in the worker", () => {
+  async function decide(request: DecideRequest = DECIDE) {
+    // A fresh worker, so it reads the fixture's configuration as it is now, and
+    // no loaded model left by an earlier call bypasses this recording runtime.
+    await disposeLlamaModels();
+    const { runtime, results } = recordingDecisions();
+    const response = await provider({ runtime }).decide(request);
+    return { response, result: results[0]! };
+  }
+
+  it("answers each question from the next-token probabilities of its letters", async () => {
+    configureDecisions("attention");
+    const { response } = await decide();
+    expect(response.answers["hooks"]).toEqual({
+      choice: "yes",
+      probabilities: { yes: 0.75, no: 0.25 },
+      confidence: 0.75,
+    });
+    expect(response.answers["tests"]).toEqual({
+      choice: "no",
+      probabilities: { yes: 0, no: 1 },
+      confidence: 1,
+    });
+    expect(response.answers["tone"]!.choice).toBe("absent");
+    expect(response.answers["tone"]!.confidence).toBeCloseTo(0.8);
+    expect(response.usage?.inputTokens).toBeGreaterThan(0);
+    expect(response.usage?.outputTokens).toBe(0);
+    expect(events("decide").map((e) => e.backend)).toEqual(["cuda", "cuda", "cuda"]);
+  });
+
+  it("evaluates the shared state once and erases each question after it", async () => {
+    configureDecisions("attention");
+    const { result } = await decide();
+    expect(result.reuse).toBe("erase");
+  });
+
+  it("restores a hybrid model's sequence from a checkpoint instead", async () => {
+    configureDecisions("attention");
+    const erased = await decide();
+    configureDecisions("hybrid");
+    const restored = await decide();
+    expect(restored.result.reuse).toBe("checkpoint");
+    expect(restored.response).toEqual(erased.response);
+  });
+
+  it("re-evaluates the state per question when the sequence cannot be restored", async () => {
+    configureDecisions("attention");
+    const erased = await decide();
+    configureDecisions("hybrid-without-checkpoints");
+    const again = await decide();
+    expect(again.result.reuse).toBe("reevaluate");
+    // The same answers, at the price of evaluating the state once per question.
+    expect(again.response.answers).toEqual(erased.response.answers);
+    expect(again.response.usage!.inputTokens).toBeGreaterThan(
+      erased.response.usage!.inputTokens + 2 * STATE.length,
+    );
+  });
+
+  it("reports no reuse for a single question", async () => {
+    configureDecisions("hybrid");
+    const { result, response } = await decide({
+      state: DECIDE.state,
+      questions: { hooks: DECIDE.questions["hooks"]! },
+    });
+    expect(result.reuse).toBeUndefined();
+    expect(response.answers["hooks"]!.choice).toBe("yes");
+  });
+
+  /** 40 tokens other than the letters, each more likely than `p` of the mass. */
+  const crowd = (p: number): Record<string, number> =>
+    Object.fromEntries([..."abcdefghijklmnopqrstuvwxyz0123456789!@#$"].map((c) => [c, p]));
+  /** How each probe read the distribution: "40" or "all". */
+  const readouts = (): string[] =>
+    readFileSync(log, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("decide "))
+      .map((line) => line.split(" ")[3]!);
+
+  it("reads only the 40 most likely tokens, so a letter outside them weighs nothing", async () => {
+    configure({
+      decide: {
+        sequence: "hybrid",
+        answers: { "skip a git hook": { A: 0.3, B: 0.001, ...crowd(0.01) } },
+      },
+    });
+    const { response } = await decide({
+      state: STATE,
+      questions: { hooks: DECIDE.questions["hooks"]! },
+    });
+    // B is not among the 40, so it weighs 0, and the letters present still sum to 1.
+    expect(response.answers["hooks"]).toEqual({
+      choice: "yes",
+      probabilities: { yes: 1, no: 0 },
+      confidence: 1,
+    });
+    expect(readouts()).toEqual(["40"]);
+  });
+
+  it("reads the whole distribution when no letter is among the 40, so a decision is never empty", async () => {
+    configure({
+      decide: {
+        sequence: "hybrid",
+        answers: {
+          "skip a git hook": { A: 0.001, B: 0.003, ...crowd(0.02) },
+          "run the tests": { B: 0.9 },
+        },
+      },
+    });
+    const { response, result } = await decide({
+      state: STATE,
+      questions: { hooks: DECIDE.questions["hooks"]!, tests: DECIDE.questions["tests"]! },
+    });
+    expect(response.answers["hooks"]!.choice).toBe("no");
+    expect(response.answers["hooks"]!.probabilities["no"]).toBeCloseTo(0.75);
+    expect(response.answers["tests"]!.choice).toBe("no");
+    expect(readouts()).toEqual(["40", "all", "40"]);
+    // The re-read went back to the shared state the way the next question does.
+    expect(result.reuse).toBe("checkpoint");
+  });
+
+  it("falls back from a backend that crashes mid-decision", async () => {
+    configureDecisions("hybrid", { abort: { cuda: "decide" } });
+    const { response } = await decide();
+    expect(response.answers["tests"]!.choice).toBe("no");
+    expect(events("decide").map((e) => e.backend)).toEqual(["cuda", "vulkan", "vulkan", "vulkan"]);
+    expect(warnings()).toHaveLength(1);
+  });
+});
+
+/** The fixture's log lines of one kind, split into fields after the kind. */
+function logged(kind: "context" | "count"): { backend: string; pid: number; n: number }[] {
+  return readFileSync(log, "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith(`${kind} `))
+    .map((line) => {
+      const [, backend, pid, n] = line.split(" ");
+      return { backend: backend!, pid: Number(pid), n: Number(n) };
+    });
+}
+const contextSizes = (): number[] => logged("context").map((c) => c.n);
+
+describe("one context per model, reused across calls", () => {
+  it("reuses the context the first call created", async () => {
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    expect(contextSizes()).toEqual([8192]);
+  });
+
+  it("creates a larger context when a call needs one, and reuses it for a smaller call", async () => {
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    // About 10000 prompt tokens, so the call needs more than 8192 but less than twice it.
+    await p.completeJSON({ ...REQUEST, user: "x".repeat(40_000) });
+    const [small, large] = contextSizes();
+    expect(small).toBe(8192);
+    expect(large).toBeGreaterThan(8192);
+    expect(large).toBeLessThanOrEqual(2 * 8192);
+    await p.completeJSON(REQUEST);
+    expect(contextSizes()).toEqual([small, large]);
+  });
+
+  it("does not keep a context more than twice the size a call needs for it", async () => {
+    const p = provider();
+    await p.completeJSON({ ...REQUEST, user: "x".repeat(80_000) });
+    await p.completeJSON(REQUEST);
+    const [large, small] = contextSizes();
+    expect(large).toBeGreaterThan(2 * 8192);
+    expect(small).toBe(8192);
+  });
+
+  it("starts each call on an empty context", async () => {
+    // The fixture refuses a context holding two questions at once, so a
+    // context left holding the last call's final question fails here.
+    configureDecisions("hybrid");
+    const p = provider();
+    const first = await p.decide(DECIDE);
+    const second = await p.decide(DECIDE);
+    expect(second).toEqual(first);
+    expect(contextSizes()).toEqual([8192]);
+  });
+
+  it("creates a new context in the worker that replaces a crashed one, and reuses that", async () => {
+    configure({ abort: { cuda: "prompt" } });
+    const p = provider();
+    await p.completeJSON(REQUEST);
+    await p.completeJSON(REQUEST);
+    expect(logged("context").map((c) => c.backend)).toEqual(["cuda", "vulkan"]);
+  });
+
+  it("counts a call's prompts in one request to the worker", async () => {
+    configureDecisions("attention");
+    await provider().decide(DECIDE);
+    // The system prompt and three questions, in one batch.
+    expect(logged("count").map((c) => c.n)).toEqual([4]);
+  });
+});
+
+const TURN = "The agent ran `git commit --no-verify`, then wrote a summary without hedges.\n\n";
+const VERDICT_SCHEMA = {
+  type: "object",
+  properties: {
+    followed: { type: "integer", minimum: 0, maximum: 100 },
+    "not-followed": { type: "integer", minimum: 0, maximum: 100 },
+    "not-applicable": { type: "integer", minimum: 0, maximum: 100 },
+  },
+  required: ["followed", "not-followed", "not-applicable"],
+  additionalProperties: false,
+};
+const RULES = [
+  "Rule: never skip git hooks.",
+  "Rule: run the tests before committing.",
+  "Rule: word summaries plainly.",
+  "Rule: answer in French.",
+];
+const verdict = (followed: number, not: number, na: number): string =>
+  JSON.stringify({ followed, "not-followed": not, "not-applicable": na });
+
+/**
+ * The fixture's scripted generations, keyed by text only that rule holds. The
+ * fixture refuses a context holding two rules at once, so a missed erase fails.
+ */
+function configureShared(
+  sequence: string,
+  outputs: Record<string, unknown> = {},
+  extra: Record<string, unknown> = {},
+): void {
+  configure({
+    sequence,
+    shared: {
+      outputs: {
+        "skip git hooks": verdict(5, 90, 5),
+        "run the tests": verdict(10, 20, 70),
+        "summaries plainly": verdict(85, 10, 5),
+        "in French": verdict(0, 95, 5),
+        ...outputs,
+      },
+    },
+    ...extra,
+  });
+}
+
+/** The real runtime, recording what each session's completeShared() reported. */
+function recordingShared(): { runtime: LlamaRuntime; results: LlamaSharedResult[] } {
+  const results: LlamaSharedResult[] = [];
+  const real = defaultLlamaRuntime();
+  return {
+    results,
+    runtime: {
+      ...real,
+      async loadModel(path) {
+        const model = await real.loadModel(path);
+        return {
+          ...model,
+          async createSession(systemPrompt, contextSize) {
+            const session = await model.createSession(systemPrompt, contextSize);
+            return {
+              ...session,
+              async completeShared(options) {
+                const result = await session.completeShared!(options);
+                results.push(result);
+                return result;
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+}
+
+// Each test forks a fresh worker, twice for the re-evaluation case: generous for slow runners.
+describe("shared-prefix JSON in the worker", { timeout: 60_000 }, () => {
+  async function shared(
+    items: string[] = RULES,
+    options: ConstructorParameters<typeof LlamaCppProvider>[1] = {},
+  ) {
+    await disposeLlamaModels();
+    const { runtime, results } = recordingShared();
+    const response = await completeJSONShared(provider({ runtime, ...options }), {
+      system: "You judge one agent turn against one rule.",
+      shared: TURN,
+      items,
+      schema: VERDICT_SCHEMA,
+    });
+    return { response, result: results[0] };
+  }
+
+  it("answers each item with its own validated object, in item order", async () => {
+    configureShared("attention");
+    const { response } = await shared();
+    expect(response.answers).toEqual([
+      { json: { followed: 5, "not-followed": 90, "not-applicable": 5 } },
+      { json: { followed: 10, "not-followed": 20, "not-applicable": 70 } },
+      { json: { followed: 85, "not-followed": 10, "not-applicable": 5 } },
+      { json: { followed: 0, "not-followed": 95, "not-applicable": 5 } },
+    ]);
+    expect(response.usage?.inputTokens).toBeGreaterThan(0);
+    expect(response.usage?.outputTokens).toBeGreaterThan(0);
+    expect(events("generate")).toHaveLength(RULES.length);
+  });
+
+  it.each([
+    ["attention", "erase"],
+    ["hybrid", "checkpoint"],
+  ])("evaluates the shared prefix once on a %s sequence, reusing it by %s", async (sequence, reuse) => {
+    configureShared(sequence);
+    const { response, result } = await shared();
+    expect(events("prefix")).toHaveLength(1);
+    expect(response.reuse).toBe(reuse);
+    expect(result?.reuse).toBe(reuse);
+  });
+
+  it("re-evaluates the prefix per item when the sequence cannot be restored, with the same answers", async () => {
+    configureShared("attention");
+    const erased = await shared();
+    rmSync(log, { force: true });
+    configureShared("hybrid-without-checkpoints");
+    const again = await shared();
+    expect(again.response.reuse).toBe("reevaluate");
+    expect(events("prefix")).toHaveLength(RULES.length);
+    expect(again.response.answers).toEqual(erased.response.answers);
+    expect(again.response.usage!.inputTokens).toBeGreaterThan(
+      erased.response.usage!.inputTokens + (RULES.length - 1) * TURN.length,
+    );
+  });
+
+  it("reports no reuse for a single item", async () => {
+    configureShared("hybrid");
+    const { response } = await shared([RULES[0]!]);
+    expect(response.reuse).toBeUndefined();
+    expect(response.answers).toEqual([
+      { json: { followed: 5, "not-followed": 90, "not-applicable": 5 } },
+    ]);
+  });
+
+  it("stops generating once the object is complete", async () => {
+    configureShared("attention", {
+      "skip git hooks": `${verdict(5, 90, 5)}\n\n\n\ntrailing text`,
+    });
+    const { response } = await shared();
+    expect(response.answers[0]).toEqual({
+      json: { followed: 5, "not-followed": 90, "not-applicable": 5 },
+    });
+  });
+
+  it("records a failed item as an error and answers the rest", async () => {
+    configureShared("hybrid", {
+      "skip git hooks": `{"followed": 5, "not-followed": 900, "not-applicable": 5}`,
+      "run the tests": "not json at all",
+      "summaries plainly": { throw: "grammar evaluation failed" },
+    });
+    const { response } = await shared();
+    expect(response.answers[0]).toEqual({
+      error: expect.stringMatching(
+        /^Response failed schema validation: \/not-followed must be <= 100/,
+      ) as unknown,
+    });
+    expect(response.answers[1]).toEqual({ error: expect.stringMatching(/JSON/) as unknown });
+    expect(response.answers[2]).toEqual({ error: "grammar evaluation failed" });
+    expect(response.answers[3]).toEqual({
+      json: { followed: 0, "not-followed": 95, "not-applicable": 5 },
+    });
+    expect(response.reuse).toBe("checkpoint");
+  });
+
+  it("records an item cut off at maxTokens as an error", async () => {
+    configureShared("attention");
+    const { response } = await shared(RULES, { maxTokens: 20 });
+    for (const answer of response.answers) {
+      expect(answer).toEqual({
+        error: expect.stringMatching(
+          /hit the token limit before completing the JSON \(maxTokens: 20\)/,
+        ) as unknown,
+      });
+    }
+  });
+
+  it("falls back from a backend that crashes mid-generation, starting over", async () => {
+    configureShared("hybrid", {}, { abort: { cuda: "generate" } });
+    const { response } = await shared();
+    expect(response.answers.every((a) => "json" in a)).toBe(true);
+    expect(events("generate").map((e) => e.backend)).toEqual([
+      "cuda",
+      ...RULES.map(() => "vulkan"),
+    ]);
+    expect(warnings()).toHaveLength(1);
   });
 });
 

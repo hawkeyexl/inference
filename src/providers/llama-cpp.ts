@@ -26,15 +26,22 @@ import {
   resolveLlamaModelRef,
 } from "./llama-models.js";
 import { createWorkerRuntime, isLlamaGpu, shutdownLlamaWorkers } from "./llama-host.js";
+import { normalizeDecision, validateDecideRequest } from "./decide.js";
+import { DEFAULT_KEEP_ALIVE_MS, callModelHost } from "./model-host.js";
+import type { HostRoute, ModelHostMode } from "./model-host.js";
+import type { DecideQuestion, DecideRequest, DecideResponse, DecisionProvider } from "./decide.js";
 import type { LlamaGpu } from "./llama-host.js";
 import type {
   CompleteJSONRequest,
   CompleteJSONResponse,
-  InferenceProvider,
+  SharedJSONProvider,
+  SharedJSONRequest,
+  SharedJSONResponse,
   TokenUsage,
 } from "./types.js";
 
 export type { LlamaGpu } from "./llama-host.js";
+export type { ModelHostMode } from "./model-host.js";
 
 export interface LlamaPromptOptions {
   /** JSON Schema converted to a GBNF grammar by the runtime. */
@@ -55,8 +62,72 @@ export interface LlamaPromptResult {
   stopReason?: string;
 }
 
+/**
+ * One decision request, as the provider hands it to a session: one user turn
+ * per question, each opening the same way, so the runtime can evaluate the
+ * shared start once. ADR 01016.
+ */
+export interface LlamaDecideOptions {
+  /** One user turn per question. */
+  prompts: string[];
+  /** What the assistant's turn opens with; the token after it is the answer. */
+  answerPrefix: string;
+  /** Per prompt, the labels whose next-token probability is read. */
+  labels: string[][];
+}
+
+/**
+ * How a session got back to the shared start between questions:
+ * `"erase"` removed the previous question from the context, `"checkpoint"`
+ * restored a snapshot (hybrid and recurrent models, which cannot erase), and
+ * `"reevaluate"` evaluated the shared start again.
+ */
+export type LlamaDecideReuse = "erase" | "checkpoint" | "reevaluate";
+
+export interface LlamaDecideResult {
+  /** Per prompt, each label's next-token probability. Need not sum to 1. */
+  weights: Record<string, number>[];
+  usage?: TokenUsage;
+  /** Absent for a single question, which reuses nothing. */
+  reuse?: LlamaDecideReuse;
+}
+
+/**
+ * A shared-prefix request, as the provider hands it to a session: one whole
+ * user turn per item, all opening with the same text, so the runtime can
+ * evaluate that start once. ADR 01018.
+ */
+export interface LlamaSharedOptions {
+  /** One user turn per item. */
+  prompts: string[];
+  /** JSON Schema every answer is generated under, as a grammar. */
+  schema: Record<string, unknown>;
+  temperature: number;
+  /** Per item. Absent: until the answer is complete. */
+  maxTokens?: number;
+}
+
+export interface LlamaSharedResult {
+  /** Per prompt: the generated text, or why generation failed. */
+  outputs: ({ text: string; stopReason?: string } | { error: string })[];
+  usage?: TokenUsage;
+  /** Absent for a single prompt, which reuses nothing. */
+  reuse?: LlamaDecideReuse;
+}
+
 export interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  /**
+   * Generate one answer per prompt, evaluating their shared start once.
+   * Optional: a runtime without it makes `completeJSONShared` reject. The
+   * real runtime has it.
+   */
+  completeShared?(options: LlamaSharedOptions): Promise<LlamaSharedResult>;
+  /**
+   * Next-token probabilities for each prompt's labels. Optional: a runtime
+   * without it makes `decide()` reject. The real runtime has it.
+   */
+  decide?(options: LlamaDecideOptions): Promise<LlamaDecideResult>;
   dispose(): Promise<void>;
   /**
    * Tokens of context the runtime actually created. llama.cpp may round a
@@ -140,6 +211,30 @@ export interface LlamaCppProviderOptions {
    * it is an error. Ignored when `runtime` is injected. ADR 01012.
    */
   gpu?: LlamaGpu;
+  /**
+   * Where calls run. `"off"` (the default): in this process's own worker.
+   * `"connect"`: in a running model host, which keeps the model loaded across
+   * processes, else as `"off"`. `"spawn"`: in a model host, starting one
+   * when none runs. Ignored when `runtime` is injected. ADR 01017.
+   */
+  host?: ModelHostMode;
+  /**
+   * Milliseconds the model host keeps the model loaded after this provider's
+   * last call, when no lease holds it. Default 600000; 0 unloads it as soon as
+   * nothing holds it and nothing waits for it.
+   */
+  keepAlive?: number;
+  /**
+   * A lease name. Each call through the host takes or renews this session's
+   * lease, which keeps the model loaded until the lease goes unused for its
+   * keepAlive, or `releaseModelHost({ session })` drops it.
+   */
+  session?: string;
+  /**
+   * Milliseconds a call may wait in the model host's queue before it is
+   * withdrawn with `ModelHostBusyError`. Unset, it waits as long as it takes.
+   */
+  hostWaitMs?: number;
 }
 
 /**
@@ -160,6 +255,24 @@ const loadedModels = new Map<string, Promise<LlamaLoadedModel>>();
  * adding one to the contract would make all five providers carry a lifecycle
  * only this one has. Short-lived processes can skip it.
  */
+/** The key `loadedModels` holds a model under. For the model host. */
+export function llamaModelKey(directory: string, model: string): string {
+  return buildCacheKey([directory, resolveLlamaModelRef(model)]);
+}
+
+/** Whether the model under `key` is loaded, or loading. For the model host. */
+export function isLlamaModelLoaded(key: string): boolean {
+  return loadedModels.has(key);
+}
+
+/** Free one model's weights. For the model host. */
+export async function unloadLlamaModel(key: string): Promise<void> {
+  const loaded = loadedModels.get(key);
+  if (!loaded) return;
+  loadedModels.delete(key);
+  await loaded.then((m) => m.dispose()).catch(() => undefined);
+}
+
 export async function disposeLlamaModels(): Promise<void> {
   const pending = [...loadedModels.values()];
   loadedModels.clear();
@@ -188,7 +301,30 @@ const CHAT_TEMPLATE_OVERHEAD_TOKENS = 512;
 /** Room for the response when `maxTokens` does not bound it. */
 const DEFAULT_RESPONSE_RESERVE_TOKENS = 2048;
 
-export class LlamaCppProvider implements InferenceProvider {
+/**
+ * A decision's response: the answer prefix the runtime adds to the assistant
+ * turn, and the one letter read after it.
+ */
+const DECIDE_ANSWER_TOKENS = 8;
+
+/**
+ * Room `stateLimit()` keeps for what the provider adds around a consumer's
+ * state and question: headings, option letters, the closing instruction.
+ * About 30 tokens plus 3 per option, so 26 options fit.
+ */
+const DECIDE_FRAMING_TOKENS = 128;
+
+/** Options are lettered, so a question has at most this many. */
+const DECIDE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** The fixed instruction every decision runs under. */
+const DECIDE_SYSTEM_PROMPT =
+  "You answer multiple-choice questions about the state the user shows you. " +
+  "Read the state and the question, then reply with the letter of the one option that fits best.";
+
+const DECIDE_ANSWER_PREFIX = "Answer:";
+
+export class LlamaCppProvider implements DecisionProvider, SharedJSONProvider {
   private readonly uri: string;
   private readonly runtime: LlamaRuntime;
   private readonly thoughtTokens: number;
@@ -202,6 +338,8 @@ export class LlamaCppProvider implements InferenceProvider {
    * back the wrong weights.
    */
   private readonly cacheKey: string;
+  /** Set when calls go through the model host. */
+  private readonly route: HostRoute | undefined;
 
   constructor(
     private readonly model: string,
@@ -229,6 +367,26 @@ export class LlamaCppProvider implements InferenceProvider {
           `got ${JSON.stringify(options.gpu) ?? String(options.gpu)}.`,
       );
     }
+    if (options.host !== undefined && !["off", "connect", "spawn"].includes(options.host)) {
+      throw new InferenceError(
+        `llamaCpp.host must be "off", "connect" or "spawn", ` +
+          `got ${JSON.stringify(options.host) ?? String(options.host)}.`,
+      );
+    }
+    for (const name of ["keepAlive", "hostWaitMs"] as const) {
+      const value = options[name];
+      if (value !== undefined && !(typeof value === "number" && value >= 0)) {
+        throw new InferenceError(
+          `llamaCpp.${name} must be a non-negative number of milliseconds, got ${String(value)}.`,
+        );
+      }
+    }
+    if (options.session !== undefined && !(typeof options.session === "string" && options.session)) {
+      throw new InferenceError(
+        `llamaCpp.session must be a non-empty string, ` +
+          `got ${JSON.stringify(options.session) ?? String(options.session)}.`,
+      );
+    }
     this.contextSize = options.contextSize;
     this.uri = resolveLlamaModelRef(model);
     this.runtime =
@@ -238,7 +396,25 @@ export class LlamaCppProvider implements InferenceProvider {
     this.maxTokens = options.maxTokens;
     this.modelsDirectory =
       options.modelsDirectory ?? defaultLlamaModelsDirectory();
-    this.cacheKey = buildCacheKey([this.modelsDirectory, this.uri]);
+    this.cacheKey = llamaModelKey(this.modelsDirectory, model);
+    const mode = options.host ?? "off";
+    this.route =
+      mode === "off" || options.runtime
+        ? undefined
+        : {
+            mode,
+            keepAliveMs: options.keepAlive ?? DEFAULT_KEEP_ALIVE_MS,
+            ...(options.session !== undefined ? { session: options.session } : {}),
+            ...(options.hostWaitMs !== undefined ? { waitMs: options.hostWaitMs } : {}),
+            model: {
+              model,
+              modelsDirectory: this.modelsDirectory,
+              thoughtTokens: this.thoughtTokens,
+              ...(options.gpu !== undefined ? { gpu: options.gpu } : {}),
+              ...(this.contextSize !== undefined ? { contextSize: this.contextSize } : {}),
+              ...(this.maxTokens !== undefined ? { maxTokens: this.maxTokens } : {}),
+            },
+          };
   }
 
   provider(): string {
@@ -250,12 +426,20 @@ export class LlamaCppProvider implements InferenceProvider {
   }
 
   async completeJSON(req: CompleteJSONRequest): Promise<CompleteJSONResponse> {
+    return this.route
+      ? callModelHost(this.route, { op: "completeJSON", request: req }, () =>
+          this.completeHere(req),
+        )
+      : this.completeHere(req);
+  }
+
+  private async completeHere(req: CompleteJSONRequest): Promise<CompleteJSONResponse> {
     const model = await this.load();
     const systemPrompt = systemPromptFor(req);
     // A fresh session per call: the contract is single-shot, and reusing one
     // would leak the previous run's turns into this one's context. Its context
     // is created here, where the prompt is known, so it is sized to the prompt.
-    const plan = await this.contextFor(model, systemPrompt, req.user);
+    const plan = await this.contextFor(model, systemPrompt, [req.user]);
     const session = await model.createSession(systemPrompt, plan.contextSize);
     // With no maxTokens, the response is capped at the room the context has
     // left. Uncapped, a long answer fills the context and node-llama-cpp shifts
@@ -274,29 +458,195 @@ export class LlamaCppProvider implements InferenceProvider {
         thoughtTokens: this.thoughtTokens,
         ...(maxTokens != null ? { maxTokens } : {}),
       });
-      // A run cut off at the token or context limit leaves truncated JSON.
-      // Without this it surfaces as "failed schema validation" — or worse,
-      // extractJson's brace-slicing fallback salvages a wrong-but-parseable
-      // object — and the retry burns another full local inference to fail the
-      // same way. Same guard as the Anthropic provider's max_tokens check.
-      if (result.stopReason === "maxTokens" && implicitMaxTokens != null) {
-        throw new Error(
-          `llama-cpp generation filled the ${contextSize}-token context before ` +
-            `completing the JSON — raise llamaCpp.contextSize, or set ` +
-            `llamaCpp.maxTokens to bound the response.`,
-        );
-      }
-      if (result.stopReason === "maxTokens") {
-        throw new Error(
-          `llama-cpp generation hit the token limit before completing the JSON` +
-            `${this.maxTokens != null ? ` (maxTokens: ${this.maxTokens})` : ""}` +
-            ` — raise llamaCpp.maxTokens, or shorten the prompt if the context is full.`,
-        );
-      }
-      return { json: extractJson(restoreOpenBrace(result.text)), usage: result.usage };
+      return {
+        json: this.parseGenerated(result, contextSize, implicitMaxTokens != null),
+        usage: result.usage,
+      };
     } finally {
       await session.dispose().catch(() => undefined);
     }
+  }
+
+  /**
+   * Parse what a grammar-constrained generation produced. A run cut off at the
+   * token or context limit leaves truncated JSON. Without the guard it
+   * surfaces as "failed schema validation" — or worse, extractJson's
+   * brace-slicing fallback salvages a wrong-but-parseable object — and the
+   * retry burns another full local inference to fail the same way. Same guard
+   * as the Anthropic provider's max_tokens check.
+   */
+  private parseGenerated(
+    result: { text: string; stopReason?: string },
+    contextSize: number,
+    /** The cap was the room left in the context, not `maxTokens`. */
+    contextFull: boolean,
+  ): unknown {
+    if (result.stopReason === "maxTokens" && contextFull) {
+      throw new Error(
+        `llama-cpp generation filled the ${contextSize}-token context before ` +
+          `completing the JSON — raise llamaCpp.contextSize, or set ` +
+          `llamaCpp.maxTokens to bound the response.`,
+      );
+    }
+    if (result.stopReason === "maxTokens") {
+      throw new Error(
+        `llama-cpp generation hit the token limit before completing the JSON` +
+          `${this.maxTokens != null ? ` (maxTokens: ${this.maxTokens})` : ""}` +
+          ` — raise llamaCpp.maxTokens, or shorten the prompt if the context is full.`,
+      );
+    }
+    return extractJson(restoreOpenBrace(result.text));
+  }
+
+  /**
+   * One answer per item over a shared prefix, generated under the schema's
+   * grammar. One session serves every item, so the prefix is evaluated once,
+   * with thinking off as for decisions. Use `completeJSONShared`, which
+   * validates each answer; this is its native path. ADR 01018.
+   */
+  async completeJSONShared(req: SharedJSONRequest): Promise<SharedJSONResponse> {
+    if (req.items.length === 0) return { answers: [] };
+    return this.route
+      ? callModelHost(this.route, { op: "completeJSONShared", request: req }, () =>
+          this.sharedHere(req),
+        )
+      : this.sharedHere(req);
+  }
+
+  private async sharedHere(req: SharedJSONRequest): Promise<SharedJSONResponse> {
+    const systemPrompt = systemPromptFor(req);
+    const prompts = req.items.map((item) => req.shared + item);
+    const model = await this.load();
+    // The session holds one item at a time, so the longest sizes it.
+    const plan = await this.contextFor(model, systemPrompt, prompts);
+    const session = await model.createSession(systemPrompt, plan.contextSize);
+    try {
+      if (!session.completeShared) {
+        throw new InferenceError(
+          "This llama-cpp runtime's sessions have no completeShared(), so the " +
+            "provider cannot answer over a shared prefix.",
+        );
+      }
+      const contextSize = session.contextSize ?? plan.contextSize;
+      const implicitMaxTokens =
+        this.maxTokens == null && plan.promptTokens != null
+          ? contextSize - plan.promptTokens
+          : undefined;
+      const maxTokens = this.maxTokens ?? implicitMaxTokens;
+      const result = await session.completeShared({
+        prompts,
+        schema: req.schema,
+        temperature: req.temperature ?? 0,
+        ...(maxTokens != null ? { maxTokens } : {}),
+      });
+      const answers = prompts.map((_, i) => {
+        const output = result.outputs[i];
+        if (!output) return { error: "The local model returned no answer for this item." };
+        if ("error" in output) return { error: output.error };
+        try {
+          return { json: this.parseGenerated(output, contextSize, implicitMaxTokens != null) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      });
+      return {
+        answers,
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.reuse ? { reuse: result.reuse } : {}),
+      };
+    } finally {
+      await session.dispose().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Probabilities over each question's options, read from the model's
+   * next-token distribution after a lettered prompt. One session serves every
+   * question, so the state is evaluated once. ADR 01016.
+   */
+  async decide(req: DecideRequest): Promise<DecideResponse> {
+    validateDecideRequest(req);
+    const questions = Object.entries(req.questions);
+    for (const [id, question] of questions) {
+      const count = Object.keys(question.criteria).length;
+      if (count > DECIDE_LETTERS.length) {
+        throw new InferenceError(
+          `llama-cpp decide() question "${id}" has ${count} criteria; it letters ` +
+            `options A to Z, so ${DECIDE_LETTERS.length} at most.`,
+        );
+      }
+    }
+    return this.route
+      ? callModelHost(this.route, { op: "decide", request: req }, () => this.decideHere(req))
+      : this.decideHere(req);
+  }
+
+  private async decideHere(req: DecideRequest): Promise<DecideResponse> {
+    const questions = Object.entries(req.questions);
+    const state =
+      typeof req.state === "string" ? req.state : JSON.stringify(req.state, null, 2);
+    const prompts = questions.map(([, question]) => decisionPrompt(state, question));
+
+    const model = await this.load();
+    const plan = await this.contextFor(
+      model,
+      DECIDE_SYSTEM_PROMPT,
+      prompts,
+      DECIDE_ANSWER_TOKENS,
+    );
+    const session = await model.createSession(DECIDE_SYSTEM_PROMPT, plan.contextSize);
+    try {
+      if (!session.decide) {
+        throw new InferenceError(
+          "This llama-cpp runtime's sessions have no decide(), so the provider " +
+            "cannot answer decisions.",
+        );
+      }
+      const result = await session.decide({
+        prompts,
+        answerPrefix: DECIDE_ANSWER_PREFIX,
+        labels: questions.map(([, question]) => lettersFor(question)),
+      });
+      const answers = Object.fromEntries(
+        questions.map(([id, question], i) => {
+          const options = Object.keys(question.criteria);
+          const weights = result.weights[i] ?? {};
+          const byOption = Object.fromEntries(
+            options.map((option, j) => [option, weights[DECIDE_LETTERS[j]!] ?? 0]),
+          );
+          return [id, normalizeDecision(options, byOption)];
+        }),
+      );
+      return { answers, ...(result.usage ? { usage: result.usage } : {}) };
+    } finally {
+      await session.dispose().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Tokens a decision accepts for its state plus its longest question: the
+   * most `decide` lets a context hold, less the fixed instruction, the chat
+   * template's overhead, the answer, and the provider's own framing. The same
+   * arithmetic `contextFor` refuses by, so a state within it is never refused.
+   */
+  async stateLimit(): Promise<number> {
+    return this.route
+      ? callModelHost(this.route, { op: "stateLimit" }, () => this.stateLimitHere())
+      : this.stateLimitHere();
+  }
+
+  private async stateLimitHere(): Promise<number> {
+    const model = await this.load();
+    const ceiling = this.contextSize ?? model.trainContextSize ?? DEFAULT_CONTEXT_SIZE;
+    const system = model.countTokens ? await model.countTokens(DECIDE_SYSTEM_PROMPT) : 0;
+    return Math.max(
+      0,
+      ceiling -
+        system -
+        CHAT_TEMPLATE_OVERHEAD_TOKENS -
+        DECIDE_ANSWER_TOKENS -
+        DECIDE_FRAMING_TOKENS,
+    );
   }
 
   /**
@@ -308,7 +658,10 @@ export class LlamaCppProvider implements InferenceProvider {
   private async contextFor(
     model: LlamaLoadedModel,
     systemPrompt: string,
-    user: string,
+    /** The user prompts the session holds, one at a time; the longest counts. */
+    users: string[],
+    /** A fixed response size, for a call `maxTokens` does not bound. */
+    responseTokens?: number,
   ): Promise<{ contextSize: number; promptTokens?: number }> {
     const ceiling = model.trainContextSize;
     const fallback =
@@ -318,11 +671,15 @@ export class LlamaCppProvider implements InferenceProvider {
         : DEFAULT_CONTEXT_SIZE);
     if (!model.countTokens) return { contextSize: fallback };
 
-    const [system, prompt] = await Promise.all([
-      model.countTokens(systemPrompt),
-      model.countTokens(user),
-    ]);
+    const countTokens = model.countTokens.bind(model);
+    const [system = 0, ...counts] = await Promise.all(
+      [systemPrompt, ...users].map((text) => countTokens(text)),
+    );
+    const prompt = Math.max(0, ...counts);
+    // A decision reads one token, so maxTokens and thinking do not bound it.
+    const bounded = responseTokens == null && this.maxTokens != null;
     const response =
+      responseTokens ??
       (this.maxTokens ?? DEFAULT_RESPONSE_RESERVE_TOKENS) + this.thoughtTokens;
     const promptTokens = system + prompt + CHAT_TEMPLATE_OVERHEAD_TOKENS;
     const needed = promptTokens + response;
@@ -336,8 +693,9 @@ export class LlamaCppProvider implements InferenceProvider {
         throw new InferenceError(
           `llama-cpp prompt needs ${needed} tokens of context, more than ` +
             `llamaCpp.contextSize (${this.contextSize}). ${counted} Raise ` +
-            `llamaCpp.contextSize, ${this.maxTokens != null ? "lower" : "set"} ` +
-            `llamaCpp.maxTokens, or leave contextSize unset so the context is sized to the prompt.`,
+            `llamaCpp.contextSize, ${
+              responseTokens != null ? "" : `${bounded ? "lower" : "set"} llamaCpp.maxTokens, `
+            }or leave contextSize unset so the context is sized to the prompt.`,
         );
       }
       return { contextSize: this.contextSize, promptTokens };
@@ -346,7 +704,7 @@ export class LlamaCppProvider implements InferenceProvider {
       throw new InferenceError(
         `llama-cpp prompt needs ${needed} tokens of context, more than this ` +
           `model's training context of ${ceiling} tokens. ${counted} Shorten the ` +
-          `prompt${this.maxTokens != null ? ", or lower llamaCpp.maxTokens" : ""}.`,
+          `prompt${bounded ? ", or lower llamaCpp.maxTokens" : ""}.`,
       );
     }
     return { contextSize: Math.max(fallback, needed), promptTokens };
@@ -378,13 +736,31 @@ export class LlamaCppProvider implements InferenceProvider {
 }
 
 /**
+ * One question's user turn. The state comes first, so every question of a
+ * request opens with the same text and the runtime evaluates it once.
+ */
+function decisionPrompt(state: string, question: DecideQuestion): string {
+  const options = Object.entries(question.criteria)
+    .map(([id, meaning], i) => `${DECIDE_LETTERS[i]!}. ${meaning || id}`)
+    .join("\n");
+  return (
+    `# State\n\n${state}\n\n# Question\n\n${question.instructions}\n\n${options}\n\n` +
+    `Reply with the letter of one option.`
+  );
+}
+
+function lettersFor(question: DecideQuestion): string[] {
+  return [...DECIDE_LETTERS.slice(0, Object.keys(question.criteria).length)];
+}
+
+/**
  * The grammar constrains the SHAPE of the output, but `node-llama-cpp` never
  * shows the schema to the model — so `description` fields, which is where
  * consumers put their domain instructions (ADR 01001), would be invisible.
  * Restating the schema is the same fix the Claude CLI provider and the
  * OpenAI json_object fallback already use.
  */
-function systemPromptFor(req: CompleteJSONRequest): string {
+function systemPromptFor(req: { system: string; schema: Record<string, unknown> }): string {
   return `${req.system}\n\nRespond with ONLY a JSON object conforming to this JSON Schema:\n${JSON.stringify(
     req.schema,
   )}`;

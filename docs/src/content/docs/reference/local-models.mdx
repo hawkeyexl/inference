@@ -114,6 +114,60 @@ every part of a split model. An unknown name is rejected rather than silently ma
 [local-model workers](#the-worker-process-and-the-backend). Weights load once per process and are
 shared across providers naming the same model.
 
+## Preparing a model
+
+Get weights onto disk, and ask where they stand, without loading them into memory.
+
+```ts
+function ensureModel(model: string, options?: LlamaModelLifecycleOptions): Promise<EnsureModelResult>;
+function modelState(model: string, options?: LlamaModelLifecycleOptions): Promise<LlamaModelState>;
+function fits(model: string, options?: LlamaModelLifecycleOptions): Promise<FitsResult>;
+
+interface LlamaModelLifecycleOptions {
+  modelsDirectory?: string;  // defaults to defaultLlamaModelsDirectory()
+  gpu?: LlamaGpu;            // the backend the memory probe runs on
+  runtime?: LlamaRuntime;    // test seam; ensureModel then skips the runtime install
+  install?: RuntimeInstallOptions;  // how an absent runtime is installed
+}
+
+interface EnsureModelResult {
+  state: "downloaded" | "ready";  // "downloaded": this call fetched it
+  bytes: number;                  // on disk, summed over a split model's parts
+}
+
+type LlamaModelState = "ready" | "downloading" | "missing";
+
+interface FitsResult {
+  fits: boolean;
+  needBytes: number;  // the model's size times 3.5
+  freeBytes: number;  // the memory the provider would have for weights
+}
+```
+
+All three take what the provider takes: a catalog alias, a tier keyword or `auto`, an `hf:` URI, or
+a path to a `.gguf` file. The options are the `modelsDirectory`, `gpu` and `runtime` of
+`LlamaCppProviderOptions`, so one object serves both.
+
+**`ensureModel`** downloads the weights and the `node-llama-cpp` runtime, and loads neither. The
+runtime comes through [the same install path](#getting-the-runtime) as the provider's and obeys
+`INFERENCE_NO_AUTO_INSTALL`. It is checked before the download, so a refused install fails before
+any weights move. A model already on disk returns `"ready"` without touching the network.
+
+Callers are serialised by a lock file, `.download-<blob>.lock`, in the models directory. A second
+caller waits, and returns `"ready"` when the file appears. A lock whose process has died is
+reclaimed at once. The wait is capped at two hours, and a lock older than six hours is treated as
+abandoned.
+
+**`modelState`** answers without waiting, loading or downloading. `"downloading"` means a live
+process holds the download lock, or a `.ipull` partial for the model was written in the last two
+minutes. A dead process's lock and a partial gone quiet are `"missing"`. A `.gguf` path that
+exists is always `"ready"`. `auto` reads the runtime's memory budget to choose a tier, which can
+start the [local-model worker](#the-worker-process-and-the-backend).
+
+**`fits`** compares the model's size times the headroom `tierForBudget` uses, 3.5, with the memory
+the provider would have for weights: the larger of free VRAM and half of RAM. A catalog model is
+sized from the catalog. Any other model is sized from its file, so it must already be downloaded.
+
 ## The runtime seam
 
 ```ts
@@ -132,8 +186,37 @@ interface LlamaLoadedModel {
 
 interface LlamaSession {
   prompt(text: string, options: LlamaPromptOptions): Promise<LlamaPromptResult>;
+  decide?(options: LlamaDecideOptions): Promise<LlamaDecideResult>;   // for decide()
+  completeShared?(options: LlamaSharedOptions): Promise<LlamaSharedResult>;   // for completeJSONShared
   dispose(): Promise<void>;
   readonly contextSize?: number;   // tokens of context actually created
+}
+
+interface LlamaDecideOptions {
+  prompts: string[];      // one user turn per question
+  answerPrefix: string;   // the assistant turn opens with this; the next token is the answer
+  labels: string[][];     // per prompt, the labels whose next-token probability is read
+}
+
+interface LlamaDecideResult {
+  weights: Record<string, number>[];   // per prompt, label -> next-token probability
+  usage?: TokenUsage;
+  reuse?: LlamaDecideReuse;            // absent for a single question
+}
+
+type LlamaDecideReuse = "erase" | "checkpoint" | "reevaluate";
+
+interface LlamaSharedOptions {
+  prompts: string[];                  // one whole user turn per item
+  schema: Record<string, unknown>;    // each answer is generated under its grammar
+  temperature: number;
+  maxTokens?: number;                 // per item
+}
+
+interface LlamaSharedResult {
+  outputs: ({ text: string; stopReason?: string } | { error: string })[];   // per prompt
+  usage?: TokenUsage;
+  reuse?: LlamaDecideReuse;           // absent for a single item
 }
 
 interface LlamaPromptOptions {
@@ -166,18 +249,22 @@ no GPU. See [testing your integration](/inference/keep-it-working/testing/).
 `getMemoryBudgetBytes` returns `max(free VRAM, totalmem() / 2)`, falling back to `totalmem() / 2`
 when the GPU probe fails.
 
-The provider passes `createSession` the context size it computed for the prompt. The real runtime
-creates exactly that many tokens of context, rounded up to a multiple of 256 by llama.cpp, and 8192
-when no size is passed. `trainContextSize` and `countTokens` are optional, so a fake written without
-them still satisfies the interface. Without `countTokens`, the provider uses the 8192-token default
-and does not check that the prompt fits. `countTokens` may return a promise; the real runtime's does,
-because its tokenizer lives in the worker.
+The provider passes `createSession` the context size it computed for the prompt, and the real
+runtime treats no size as 8192. The real runtime keeps one idle context per model. A session takes
+it, emptied, when it holds at least the size asked for and at most twice it. Otherwise the runtime
+creates exactly the size asked for, rounded up to a multiple of 256 by llama.cpp, and disposes the
+idle one. `trainContextSize` and `countTokens` are optional, so a fake written without them still
+satisfies the interface. Without `countTokens`, the provider uses the 8192-token default and does
+not check that the prompt fits. `countTokens` may return a promise; the real runtime's does, because
+its tokenizer lives in the worker. Counts asked for in the same tick reach the worker as one request.
 
 ## `LlamaCppProvider`
 
 ```ts
-class LlamaCppProvider implements InferenceProvider {
+class LlamaCppProvider implements DecisionProvider {
   constructor(model: string, options?: LlamaCppProviderOptions);
+  // The native path completeJSONShared takes; call completeJSONShared, which validates.
+  completeJSONShared(req: SharedJSONRequest): Promise<SharedJSONResponse>;
 }
 
 interface LlamaCppProviderOptions {
@@ -187,16 +274,23 @@ interface LlamaCppProviderOptions {
   contextSize?: number;     // default: sized to each prompt, 8192 tokens at least
   modelsDirectory?: string;
   gpu?: LlamaGpu;           // default: NODE_LLAMA_CPP_GPU, else "auto"
+  host?: ModelHostMode;     // default "off"; see "The model host"
+  keepAlive?: number;       // ms, default 600000
+  session?: string;
+  hostWaitMs?: number;      // ms, default: no limit
 }
 ```
 
 A fresh session per call — the contract is single-shot. The schema is compiled to a GBNF grammar
-**and** restated in the system prompt, because the grammar hides descriptions from the model.
+**and** restated in the system prompt, because the grammar hides descriptions from the model. The
+grammar admits compact JSON only, with no space or newline between tokens, so no output tokens go
+to indentation. A string property's `maxLength` caps it in the grammar, so the model cannot write
+past it.
 Truncation at `maxTokens` is reported as an error naming the limit rather than a validation failure.
 
 ### Context size
 
-Each call gets a fresh context, sized once the prompt is known. The context is most of what a call
+Each call gets an empty context, sized once the prompt is known. The context is most of what a call
 costs in memory beyond the weights, so this is the number that decides whether a run fits a machine.
 
 The provider counts the tokens the call needs with the model's own tokenizer:
@@ -213,6 +307,10 @@ The provider counts the tokens the call needs with the model's own tokenizer:
 | unset (default) | 8192 tokens, or the count when it is larger, up to the model's training context | error naming the training context |
 | a number | exactly that many tokens | error naming `llamaCpp.contextSize` |
 
+The context a call runs in is the last call's, emptied, when that one holds at least the size in
+the table and at most twice it. So a call never gets less context than the table gives, and an idle
+model holds at most one context.
+
 A call that does not fit is never sent, because llama.cpp would shift the start of the prompt out of
 the context. It fails with an `InferenceError`, which `completeValidatedJSON` and `judge` record on
 `run.error`. The messages are in the [error reference](/inference/reference/errors/).
@@ -222,6 +320,96 @@ memory allowed. For `granite-4.1-3b-q2`, trained on 131072 tokens, a one-field p
 tokens took 12.9 GB on CPU. With the 8192-token default the same call takes 2.85 GB.
 [ADR 01011](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01011-size-the-local-context-to-the-prompt.md)
 records the measurements and the options weighed.
+
+### Decisions
+
+`LlamaCppProvider` is a [decision provider](/inference/reference/providers/#decisions). `decide()`
+reads the model's own probability for each option, so `confidence` is a measurement, not generated
+text.
+
+Each question becomes one user turn under a fixed system prompt. The options are lettered A, B, C in
+`criteria` order, each shown with its meaning (or its id, when the meaning is empty). The state comes
+first, as given when it is a string and as indented JSON otherwise:
+
+```text
+# State
+
+<state>
+
+# Question
+
+<instructions>
+
+A. <meaning of the first option>
+B. <meaning of the second option>
+
+Reply with the letter of one option.
+```
+
+The model's chat template wraps the turn, and the assistant's turn opens with `Answer:`. The
+provider reads the next-token probability of each letter, summed over the letter's token with and
+without a leading space, and [normalizes](/inference/reference/providers/#decisions) them over the
+options. It reads them among the 40 most likely next tokens, and a letter outside those weighs 0.
+A question with no letter among them is read again over the whole vocabulary. Thinking is off: Qwen3 and Qwen3.5 get the empty think block their template uses for that,
+and Gemma 4 gets its non-reasoning prompt. Nothing is generated, so `usage.outputTokens` is 0.
+
+Every question of a request runs on one session, and the state is evaluated once. After each
+question the session returns to the end of the state, which the runtime reports as `reuse`:
+
+| `reuse` | How | Models |
+|---|---|---|
+| `"erase"` | the question's tokens are removed from the context | attention models, such as Granite 4.1 |
+| `"checkpoint"` | the state is restored from a snapshot taken after it | hybrid and recurrent models, such as Qwen3.5 |
+| `"reevaluate"` | the state is evaluated again | a model that can do neither |
+
+The answers are the same either way; only the cost differs. `reuse` is on the runtime's result, not
+on `DecideResponse`. Wrap `defaultLlamaRuntime()` to see it, as the live suite does.
+
+The context is sized as for `completeJSON`, with the longest question's prompt as the user prompt
+and 8 tokens for the answer. `stateLimit()` returns the tokens left for the state plus the longest
+question: the training context, or `contextSize` when set, less the system prompt, the 512-token
+template overhead, the answer, and 128 tokens for the provider's own headings and letters. A
+request within it is never refused. A question has at most 26 options.
+
+On an RTX 4090 with CUDA, a three-question decision on `qwen3.5-4b` takes about 160 ms a question
+once the weights are loaded. On the CPU it takes about 11 s a question.
+[ADR 01016](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01016-decide-on-local-models-from-letter-probabilities.md)
+records the design.
+
+### Shared-prefix completions
+
+[`completeJSONShared`](/inference/reference/completion/#completejsonshared) runs every item on one
+session, the way `decide()` runs every question. The system prompt is yours with the schema
+restated, as for `completeJSON`. Each item's user turn is `shared + item`, rendered whole in the
+model's chat template with thinking off, as for decisions. The tokens every item's turn shares are
+evaluated once.
+
+Each item then evaluates only its own tail and generates its answer under the schema's grammar. Generation
+stops when the JSON value is complete, when the model ends its turn, or at the item's token limit.
+The session then returns to the end of the shared tokens, and reports how as `reuse`, with the
+values in the table above. Unlike a decision, `reuse` is on the response, `SharedJSONResponse.reuse`.
+
+The context is sized by the same rule as `completeJSON`, with the longest item's turn as the user
+prompt. It holds one item at a time, so 30 items need no more context than the longest one. With
+`maxTokens` unset, each item may use the room its context has left. `thoughtTokens` does not apply,
+because thinking is off.
+
+An item whose answer is cut off, does not parse, or fails the schema is `{ error }`, and the next
+item runs as usual. A failed answer is not retried here: at temperature 0 the same prefix
+generates the same tokens. A worker crash retries the whole request on the next backend, as for a
+prompt. Through the [model host](#the-model-host) the request is one job in the model's queue.
+
+On an RTX 4090 with CUDA, 30 rules over a turn of about 3700 tokens, with a three-integer schema:
+
+| Model | `reuse` | 30 items | Per item | One item alone |
+|---|---|---|---|---|
+| `qwen3.5-4b` | `checkpoint` | 7.0 s | about 230 ms | about 730 ms |
+| `granite-4.1-3b-q2` | `erase` | 3.6 s | about 120 ms | about 800 ms |
+
+The last column is what each item costs when the turn is evaluated for it alone, which is what 30
+independent `completeJSON` calls pay.
+[ADR 01018](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01018-structured-answers-over-a-shared-prefix.md)
+records the design.
 
 ## The worker process and the backend
 
@@ -258,6 +446,96 @@ The runtime then runs in-process as before and warns that a native crash will en
 
 [ADR 01012](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01012-isolate-local-inference-in-a-worker-process.md)
 records the crash, the options weighed, and why a pre-flight probe cannot replace this.
+
+## The model host
+
+A process that makes one call and exits pays a full model load on every run: seconds, and gigabytes
+read again. Several such processes at once each load their own copy. Hooks are the usual case, since
+each hook is a fresh process. The model host is one detached process, per user and runtime
+directory, that keeps models loaded for every process that calls it.
+
+```ts
+type ModelHostMode = "off" | "connect" | "spawn";
+
+function leaseModelHost(options: LeaseModelHostOptions): Promise<{ pid: number } | null>;
+function modelHostStatus(): Promise<ModelHostStatus | null>;
+function releaseModelHost(
+  options: { session: string } | { all: true },
+): Promise<ReleaseModelHostResult>;
+
+class ModelHostBusyError extends InferenceError {}   // name: "ModelHostBusyError"
+
+interface LeaseModelHostOptions {
+  model: string;            // a concrete model, as the provider takes it
+  session: string;          // names the lease
+  keepAlive?: number;       // ms the lease outlives its last use; default 600000
+  spawn?: boolean;          // start a host when none runs; default true
+  modelsDirectory?: string;
+  gpu?: LlamaGpu;
+  hostWaitMs?: number;      // ms the load may wait in the queue; default: no limit
+}
+
+interface ModelHostStatus {
+  pid: number;
+  models: { model: string; sessions: number; idleMs: number; queued: number }[];
+}
+
+interface ReleaseModelHostResult {
+  released: string[];       // sessions whose leases were dropped
+  unloaded: string[];       // models unloaded as a result
+  hostStopped: boolean;
+}
+```
+
+Turn it on per provider with `llamaCpp.host`:
+
+| `host` | Where calls run |
+|---|---|
+| `"off"` (default) | In your process's own worker, as described above. Nothing changes. |
+| `"connect"` | In a running host. When none runs, or it dies mid-call, in your process's own worker instead. |
+| `"spawn"` | In a host, which the first call starts when none runs. A host that dies mid-call is replaced and the call retried once. |
+
+`host` is ignored when `runtime` is injected. The host runs the same provider, so the worker, the
+backend fallback, context sizing and every error are unchanged; only the process holding the weights
+moves. The host is `llama-hostd.js` beside the package's `index.js`, started detached, so it
+outlives the process that started it.
+
+Calls queue per model. One call per model runs at a time, in arrival order. Two models load side by
+side only when [`fits`](#preparing-a-model) says the second fits beside the first; otherwise the
+host unloads the idle one first, and a call that must wait for memory holds back the calls behind
+it. A call still queued after `hostWaitMs` is withdrawn with `ModelHostBusyError`, and nothing
+runs.
+
+A model stays loaded while it is busy or queued, while a live lease holds it, and for `keepAlive`
+after its last call finishes. The keepAlive is the latest call's, default 600000 ms (10 minutes); `0`
+unloads it as soon as nothing holds it or waits for it. The host exits when nothing is loaded and no
+client is connected, so it never lingers on its own.
+
+A lease is a named hold on a model:
+
+- `leaseModelHost({ model, session })` takes one and loads the model, so later calls find it warm.
+  Call it when a session starts.
+- A call whose provider has `session` set takes that lease, or renews it if it exists. A lease keeps
+  the keepAlive it was taken with.
+- A lease lapses once unused for its keepAlive.
+- `releaseModelHost({ session })` drops that session's leases and unloads any model no other lease
+  holds. With `{ all: true }`, it drops every lease, withdraws queued calls, waits for running ones,
+  unloads everything and stops the host. Both resolve once the memory is free.
+
+`modelHostStatus()` and `releaseModelHost()` never start a host; with none running they return
+`null` and an empty result. In status, `sessions` counts live leases, `idleMs` is the time since
+the model's last call (0 while one runs), and `queued` counts calls waiting behind it.
+
+The host lives in `<runtime dir>/host/`, a directory only you can open where the OS allows it,
+so `INFERENCE_RUNTIME_DIR` moves it too. It listens on a Unix socket there, or on Windows on the
+named pipe `\.pipehawkeyexl-inference-<user>-<hash>`. A client must open with the token the
+host writes to `host.token` in that directory, readable only by you; any other first message
+closes the connection. A start lock lets one host start when several clients start one at once, and
+a lock or socket left by a host that died is reclaimed. The host's stderr, including the backend
+switch warnings, goes to `host.log` there, not to your console.
+
+[ADR 01017](https://github.com/hawkeyexl/ts-inference/blob/main/adrs/01017-keep-local-models-loaded-in-a-model-host.md)
+records the design and the options weighed.
 
 ## Getting the runtime
 
@@ -317,6 +595,7 @@ single install; concurrent processes serialise on a lock file in the prefix.
 
 ## Source of truth
 
-`src/providers/llama-models.ts`, `llama-cpp.ts`, `llama-clean.ts`, and `llama-install.ts`. Catalog
+`src/providers/llama-models.ts`, `llama-cpp.ts`, `llama-clean.ts`, `llama-install.ts`,
+`llama-lifecycle.ts`, `model-host.ts`, and `llama-hostd.ts`. Catalog
 invariants, tier selection, every clearing rule, and the install's ordering and concurrency
 guarantees are pinned in `test/unit/llama-*.test.ts`.
